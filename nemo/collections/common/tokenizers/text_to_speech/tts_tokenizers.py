@@ -700,6 +700,7 @@ class IPATokenizer(BaseTokenizer):
         sep='|',  # To be able to distinguish between symbols
         add_blank_at=None,
         pad_with_space=False,
+        skip_oov=True,
     ):
         """General-purpose IPA-based tokenizer.
         Args:
@@ -788,6 +789,7 @@ class IPATokenizer(BaseTokenizer):
 
         self.punct = punct
         self.pad_with_space = pad_with_space
+        self.skip_oov = skip_oov
 
         self.g2p = g2p
 
@@ -830,10 +832,13 @@ class IPATokenizer(BaseTokenizer):
                 # Add punct
                 ps.append(p)
             elif p != space:
-                message = f"Text: [{''.join(g2p_text)}] contains unknown char/phoneme: [{p}]."
-                if raw_text is not None:
-                    message += f"Original text: [{raw_text}]. Symbol will be skipped."
-                logging.warning(message)
+                if self.skip_oov:
+                    message = f"Text: [{''.join(g2p_text)}] contains unknown char/phoneme: [{p}]."
+                    if raw_text is not None:
+                        message += f"Original text: [{raw_text}]. Symbol will be skipped."
+                    logging.warning(message)
+                else:
+                    ps.append(self.OOV)
 
         # Remove trailing spaces
         if ps:

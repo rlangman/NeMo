@@ -14,6 +14,7 @@
 
 from typing import Tuple
 
+import json
 import torch
 from torch import Tensor
 from torch.autograd import Variable
@@ -26,7 +27,7 @@ from nemo.core.neural_types.neural_type import NeuralType
 from nemo.utils import logging
 
 
-SUPPORTED_CONDITION_TYPES = ["add", "concat", "layernorm"]
+SUPPORTED_CONDITION_TYPES = ["add", "concat", "layernorm", "concat_ffn"]
 
 
 def check_support_condition_types(condition_types):
@@ -437,12 +438,17 @@ class ConditionalLayerNorm(torch.nn.LayerNorm):
     If we don't have any conditions, this will be a normal LayerNorm.
     """
 
-    def __init__(self, hidden_dim, condition_dim=None, condition_types=[]):
+    def __init__(self, hidden_dim, condition_dim=None, condition_types=None):
+        if not condition_types:
+            condition_types = []
         check_support_condition_types(condition_types)
         self.condition = "layernorm" in condition_types
         super().__init__(hidden_dim, elementwise_affine=not self.condition)
 
         if self.condition:
+            if not condition_dim:
+                condition_dim = hidden_dim
+
             self.cond_weight = torch.nn.Linear(condition_dim, hidden_dim)
             self.cond_bias = torch.nn.Linear(condition_dim, hidden_dim)
             self.init_parameters()
@@ -476,13 +482,18 @@ class ConditionalInput(torch.nn.Module):
     If we don't have any conditions, this will be a normal pass.
     """
 
-    def __init__(self, hidden_dim, condition_dim, condition_types=[]):
+    def __init__(self, hidden_dim, condition_dim=None, condition_types=None):
+        if not condition_types:
+            condition_types = []
         check_support_condition_types(condition_types)
         super().__init__()
         self.support_types = ["add", "concat"]
         self.condition_types = [tp for tp in condition_types if tp in self.support_types]
         self.hidden_dim = hidden_dim
-        self.condition_dim = condition_dim
+        if condition_dim:
+            self.condition_dim = condition_dim
+        else:
+            self.condition_dim = hidden_dim
 
         if "add" in self.condition_types and condition_dim != hidden_dim:
             self.add_proj = torch.nn.Linear(condition_dim, hidden_dim)
@@ -695,9 +706,30 @@ class SpeakerLookupTable(torch.nn.Module):
     LookupTable based Speaker Embedding
     """
 
-    def __init__(self, n_speakers, embedding_dim):
+    def __init__(self, n_speakers, embedding_dim, speaker_path=None, speaker_profile_path=None):
         super(SpeakerLookupTable, self).__init__()
-        self.table = torch.nn.Embedding(n_speakers, embedding_dim)
+        if not speaker_path and not speaker_profile_path:
+            self.table = torch.nn.Embedding(n_speakers, embedding_dim)
+        else:
+            if not (speaker_path and speaker_profile_path):
+                raise ValueError(f"Must included both speaker paths: received {speaker_path} and {speaker_profile_path}")
+
+            with open(speaker_path, 'r', encoding="utf-8") as speaker_f:
+                speaker_index_map = json.load(speaker_f)
+
+            with open(speaker_profile_path, 'r', encoding="utf-8") as profile_f:
+                speaker_profile_map = json.load(profile_f)
+
+            assert len(speaker_index_map) == n_speakers
+            assert len(speaker_profile_map) == n_speakers
+
+            embeddings = torch.zeros([n_speakers, embedding_dim])
+            for speaker, index in speaker_index_map.items():
+                speaker_profile = torch.tensor(speaker_profile_map[speaker], dtype=torch.float32)
+                embeddings[index] = speaker_profile
+
+            print(f"Initializing speaker embeddings {embeddings.shape}")
+            self.table = torch.nn.Embedding(n_speakers, embedding_dim, _weight=embeddings)
 
     def forward(self, speaker):
         return self.table(speaker)
