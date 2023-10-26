@@ -12,11 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from nemo.collections.tts.models.acoustic_model import AcousticModel
+from nemo.collections.tts.models.acoustic_model_ar_with_context import AcousticModelAutoregressiveWithContext
+from nemo.collections.tts.models.acoustic_model_ar_with_text import AcousticModelAutoregressiveWithText
+from nemo.collections.tts.models.acoustic_model_with_context import AcousticModelWithContext
+from nemo.collections.tts.models.acoustic_model_with_text import AcousticModelWithText
 from nemo.collections.tts.models.aligner import AlignerModel
 from nemo.collections.tts.models.audio_codec import AudioCodecModel
 from nemo.collections.tts.models.easy_magpietts import EasyMagpieTTSModel
 from nemo.collections.tts.models.easy_magpietts_inference import EasyMagpieTTSInferenceModel
 from nemo.collections.tts.models.easy_magpietts_preference_optimization import EasyMagpieTTSModelOnlinePO
+from nemo.collections.tts.models.discrete_speech import DiscreteSpeechModel
+from nemo.collections.tts.models.discrete_speech_ar import DiscreteSpeechAutoregressiveModel
 from nemo.collections.tts.models.fastpitch import FastPitchModel
 from nemo.collections.tts.models.fastpitch_ssl import FastPitchModel_SSL
 from nemo.collections.tts.models.hifigan import HifiGanModel
@@ -33,6 +40,8 @@ __all__ = [
     "AlignerModel",
     "AudioCodecModel",
     "FastPitchModel",
+    "DiscreteSpeechModel",
+    "DiscreteSpeechAutoregressiveModel",
     "FastPitchModel_SSL",
     "SSLDisentangler",
     "HifiGanModel",
