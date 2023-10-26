@@ -30,6 +30,7 @@ from lightning.pytorch.loggers.wandb import WandbLogger
 from torch import Tensor
 
 from nemo.collections.tts.parts.utils.helpers import create_plot
+from nemo.collections.tts.parts.utils.tts_dataset_utils import stack_tensors
 from nemo.utils import logging
 
 HAVE_WANDB = True
@@ -49,7 +50,9 @@ def _get_logger(loggers: List[Logger], logger_type: Type[Logger]):
     raise ValueError(f"Could not find {logger_type} logger in {loggers}.")
 
 
-def _load_vocoder(model_name: Optional[str], checkpoint_path: Optional[str], type: str):
+def _load_vocoder(
+    model_name: Optional[str], checkpoint_path: Optional[str], type: str, device: Optional[str] = None, strict=True
+):
     assert (model_name is None) != (
         checkpoint_path is None
     ), f"Must provide exactly one of vocoder model_name or checkpoint: ({model_name}, {checkpoint_path})"
@@ -59,15 +62,26 @@ def _load_vocoder(model_name: Optional[str], checkpoint_path: Optional[str], typ
         from nemo.collections.tts.models import HifiGanModel
 
         model_type = HifiGanModel
+    elif type == "univnet":
+        from nemo.collections.tts.models import UnivNetModel
+
+        model_type = UnivNetModel
+    elif type == "audio_codec":
+        from nemo.collections.tts.models import AudioCodecModel
+
+        model_type = AudioCodecModel
     else:
         raise ValueError(f"Unknown vocoder type '{type}'")
 
+    if device is not None:
+        device = torch.device(device)
+
     if model_name is not None:
-        vocoder = model_type.from_pretrained(model_name)
+        vocoder = model_type.from_pretrained(model_name, map_location=device, strict=strict)
     elif checkpoint_path.endswith(".nemo"):
-        vocoder = model_type.restore_from(checkpoint_path)
+        vocoder = model_type.restore_from(checkpoint_path, map_location=device, strict=strict)
     else:
-        vocoder = model_type.load_from_checkpoint(checkpoint_path)
+        vocoder = model_type.load_from_checkpoint(checkpoint_path, map_location=device, strict=strict)
 
     return vocoder.eval()
 
@@ -87,6 +101,7 @@ class ImageArtifact:
     filepath: Path
     x_axis: str
     y_axis: str
+    color_limit: Optional[Tuple[float, float]] = None
 
 
 @dataclass
@@ -94,6 +109,7 @@ class LogAudioParams:
     vocoder_type: str
     vocoder_name: str
     vocoder_checkpoint_path: str
+    vocoder_device: Optional[str] = None
     log_audio_gta: bool = False
 
 
@@ -147,6 +163,7 @@ class LoggingCallback(Callback):
         loggers: Optional[List[Logger]] = None,
         log_tensorboard: bool = False,
         log_wandb: bool = False,
+        max_filename_len: Optional[int] = None,
     ):
         self.generators = generators
         self.data_loader = data_loader
@@ -156,6 +173,7 @@ class LoggingCallback(Callback):
         self.loggers = loggers if loggers else []
         self.log_tensorboard = log_tensorboard
         self.log_wandb = log_wandb
+        self.max_filename_len = max_filename_len
 
         if log_tensorboard:
             logging.info('Creating tensorboard logger')
@@ -183,6 +201,10 @@ class LoggingCallback(Callback):
     def _log_audio(self, audio: AudioArtifact, log_dir: Path, step: int):
         if log_dir:
             filepath = log_dir / audio.filepath
+            if self.max_filename_len and len(filepath.parts[-1]) > self.max_filename_len:
+                suffix = filepath.suffix
+                filepath = (filepath.parent / filepath.stem[: self.max_filename_len - len(suffix)]).with_suffix(suffix)
+
             filepath.parent.mkdir(parents=True, exist_ok=True)
             sf.write(file=filepath, data=audio.data, samplerate=audio.sample_rate)
 
@@ -201,11 +223,19 @@ class LoggingCallback(Callback):
     def _log_image(self, image: ImageArtifact, log_dir: Path, step: int):
         if log_dir:
             filepath = log_dir / image.filepath
+            if self.max_filename_len:
+                filepath = (filepath.parent / filepath.stem[: self.max_filename_len]).with_suffix(filepath.suffix)
             filepath.parent.mkdir(parents=True, exist_ok=True)
         else:
             filepath = None
 
-        image_plot = create_plot(output_filepath=filepath, data=image.data, x_axis=image.x_axis, y_axis=image.y_axis)
+        image_plot = create_plot(
+            output_filepath=filepath,
+            data=image.data,
+            x_axis=image.x_axis,
+            y_axis=image.y_axis,
+            color_limit=image.color_limit,
+        )
 
         if self.tensorboard_logger:
             self.tensorboard_logger.add_image(
@@ -255,6 +285,7 @@ class LoggingCallback(Callback):
     def on_train_epoch_end(self, trainer: Trainer, model: LightningModule):
         """Log artifacts at the end of an epoch."""
         epoch = 1 + model.current_epoch
+
         if (epoch not in self.log_epochs) and (epoch % self.epoch_frequency != 0):
             return
 
@@ -424,7 +455,9 @@ class AudioCodecArtifactGenerator(ArtifactGenerator):
 
         with torch.no_grad():
             # [B, D, T]
-            encoded, encoded_len = model.encode_audio(audio=audio, audio_len=audio_len)
+            encoded, encoded_len = model.encode_audio(
+                audio=audio, audio_len=audio_len, sample_rate=model.output_sample_rate
+            )
 
         if self.log_encoding:
             for i, (dataset_name, audio_id) in enumerate(zip(dataset_names, audio_ids)):
@@ -439,7 +472,7 @@ class AudioCodecArtifactGenerator(ArtifactGenerator):
                 )
                 image_artifacts.append(encoded_artifact)
 
-        if not self.log_dequantized:
+        if not self.log_dequantized or not model.vector_quantizer:
             return image_artifacts
 
         with torch.no_grad():
@@ -521,10 +554,12 @@ class FastPitchArtifactGenerator(ArtifactGenerator):
         else:
             self.log_audio = True
             self.log_audio_gta = audio_params.log_audio_gta
+            self.vocoder_type = audio_params.vocoder_type
             self.vocoder = _load_vocoder(
                 model_name=audio_params.vocoder_name,
                 checkpoint_path=audio_params.vocoder_checkpoint_path,
-                type=audio_params.vocoder_type,
+                type=self.vocoder_type,
+                device=audio_params.vocoder_device,
             )
 
     def _create_ground_truth_artifacts(
@@ -563,7 +598,10 @@ class FastPitchArtifactGenerator(ArtifactGenerator):
     def _generate_audio(self, mels: Tensor, mels_len: Tensor, hop_length: int):
         voc_input = mels.to(self.vocoder.device)
         with torch.no_grad():
-            audio_pred = self.vocoder.convert_spectrogram_to_audio(spec=voc_input)
+            if self.vocoder_type == "audio_codec":
+                audio_pred, _ = self.vocoder.decode_audio(inputs=voc_input, input_len=mels_len)
+            else:
+                audio_pred = self.vocoder.convert_spectrogram_to_audio(spec=voc_input)
 
         mels_len_array = mels_len.cpu().numpy()
         audio_pred_lens = librosa.core.frames_to_samples(mels_len_array, hop_length=hop_length)
@@ -628,14 +666,13 @@ class FastPitchArtifactGenerator(ArtifactGenerator):
         audio_lens = batch_dict.get("audio_lens")
         text = batch_dict.get("text")
         text_lens = batch_dict.get("text_lens")
-        attn_prior = batch_dict.get("align_prior_matrix", None)
         pitch = batch_dict.get("pitch", None)
         energy = batch_dict.get("energy", None)
         speaker = batch_dict.get("speaker_id", None)
 
         mels, spec_len = model.preprocessor(input_signal=audio, length=audio_lens)
         with torch.no_grad():
-            mels_pred, mels_pred_len, _, _, _, attn, _, _, _, _, _, _ = model.forward(
+            mels_pred, mels_pred_len, _, _, _, attn, _, _, _, _, _, _, _, _, _ = model.forward(
                 text=text,
                 input_lens=text_lens,
                 pitch=pitch,
@@ -643,7 +680,6 @@ class FastPitchArtifactGenerator(ArtifactGenerator):
                 speaker=speaker,
                 spec=mels,
                 mel_lens=spec_len,
-                attn_prior=attn_prior,
             )
 
         if self.log_alignment:
@@ -709,5 +745,160 @@ class FastPitchArtifactGenerator(ArtifactGenerator):
             )
             audio_artifacts += audio_gta_pred
             image_artifacts += alignments
+
+        return audio_artifacts, image_artifacts
+
+
+class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
+    """
+    Generator for logging DiscreteSpeech model outputs.
+    """
+
+    def __init__(
+        self,
+        audio_codec_path,
+        audio_codec_name: Optional[str] = None,
+        audio_codec_type: str = "audio_codec",
+        log_audio: bool = False,
+        log_alignment: bool = False,
+        frames_per_iter: int = 1,
+        audio_weight: float = 1.0,
+        audio_topk: Optional[int] = None,
+        audio_temperature: Optional[float] = None,
+        duration_weight: float = 1.0,
+        duration_topk: Optional[int] = None,
+        duration_temperature: Optional[float] = None,
+        silence_pad_start: Optional[int] = None,
+        silence_pad_end: Optional[int] = None,
+    ) -> None:
+        self.log_audio = log_audio
+        self.log_alignment = log_alignment
+        self.frames_per_iter = frames_per_iter
+        self.audio_weight = audio_weight
+        self.audio_topk = audio_topk
+        self.audio_temperature = audio_temperature
+        self.duration_weight = duration_weight
+        self.duration_topk = duration_topk
+        self.duration_temperature = duration_temperature
+        self.silence_pad_start = silence_pad_start
+        self.silence_pad_end = silence_pad_end
+        self.audio_codec = _load_vocoder(
+            model_name=audio_codec_name,
+            checkpoint_path=audio_codec_path,
+            type=audio_codec_type,
+            strict=False,
+        )
+
+    def _create_ground_truth_artifacts(
+        self, audio_codec: LightningModule, dataset_names: List[str], audio_ids: List[str], batch_dict: Dict
+    ):
+        audio_artifacts = []
+        image_artifacts = []
+        audio_tokens = batch_dict.get("audio_tokens")
+        audio_token_lens = batch_dict.get("audio_token_lens")
+
+        if self.log_audio:
+            with torch.no_grad():
+                audio, audio_len = audio_codec.decode(tokens=audio_tokens, tokens_len=audio_token_lens)
+
+            for i, (dataset_name, audio_id) in enumerate(zip(dataset_names, audio_ids)):
+                audio_gt_path = Path(f"{dataset_name}/{audio_id}_gt.wav")
+                audio_gt_i = audio[i, : audio_len[i]].cpu().numpy()
+                audio_artifact = AudioArtifact(
+                    id=f"audio_gt_{audio_id}",
+                    data=audio_gt_i,
+                    filepath=audio_gt_path,
+                    sample_rate=audio_codec.output_sample_rate,
+                )
+                audio_artifacts.append(audio_artifact)
+
+        return audio_artifacts, image_artifacts
+
+    def _generate_predictions(
+        self,
+        model: LightningModule,
+        audio_codec: LightningModule,
+        dataset_names: List[str],
+        audio_ids: List[str],
+        batch_dict: Dict,
+    ) -> Tuple[List[AudioArtifact], List[ImageArtifact]]:
+
+        audio_artifacts = []
+        image_artifacts = []
+        text = batch_dict.get("text")
+        text_len = batch_dict.get("text_lens")
+        audio_tokens = batch_dict.get("audio_tokens")
+        audio_len = batch_dict.get("audio_token_lens")
+
+        with torch.no_grad():
+            audio_tokens_pred, audio_token_lens = model.infer(
+                text=text,
+                text_len=text_len,
+                context_tokens=audio_tokens,
+                context_len=audio_len,
+                frames_per_iter=self.frames_per_iter,
+                audio_weight=self.audio_weight,
+                audio_topk=self.audio_topk,
+                audio_temperature=self.audio_temperature,
+                duration_weight=self.duration_weight,
+                duration_topk=self.duration_topk,
+                duration_temperature=self.duration_temperature,
+                silence_pad_start=self.silence_pad_start,
+                silence_pad_end=self.silence_pad_end,
+            )
+
+        if self.log_audio:
+            with torch.no_grad():
+                # [B, T_audio]
+                audio_pred, audio_pred_lens = audio_codec.decode(tokens=audio_tokens_pred, tokens_len=audio_token_lens)
+
+            for i, (dataset_name, audio_id) in enumerate(zip(dataset_names, audio_ids)):
+                audio_pred_path = Path(f"{dataset_name}/{audio_id}.wav")
+                audio_pred_i = audio_pred[i][: audio_pred_lens[i]].cpu().numpy()
+                audio_artifact = AudioArtifact(
+                    id=f"audio_{audio_id}",
+                    data=audio_pred_i,
+                    filepath=audio_pred_path,
+                    sample_rate=audio_codec.output_sample_rate,
+                )
+                audio_artifacts.append(audio_artifact)
+
+        return audio_artifacts, image_artifacts
+
+
+    def generate_artifacts(
+        self, model: LightningModule, batch_dict: Dict, initial_log: bool = False
+    ) -> Tuple[List[AudioArtifact], List[ImageArtifact]]:
+
+        is_train = model.training
+        model.eval()
+
+        audio_codec = self.audio_codec.to(model.device).eval()
+
+        dataset_names = batch_dict.get("dataset_names")
+        audio_filepaths = batch_dict.get("audio_filepaths")
+        audio_ids = [create_id(p) for p in audio_filepaths]
+
+        if initial_log:
+            audio_artifacts, image_artifacts = self._create_ground_truth_artifacts(
+                audio_codec=audio_codec, batch_dict=batch_dict, dataset_names=dataset_names, audio_ids=audio_ids
+            )
+        else:
+            audio_artifacts = []
+            image_artifacts = []
+
+            if self.log_audio:
+                audio_pred, dequantized_pred = self._generate_predictions(
+                    audio_codec=audio_codec,
+                    model=model,
+                    batch_dict=batch_dict,
+                    dataset_names=dataset_names,
+                    audio_ids=audio_ids,
+                )
+                audio_artifacts += audio_pred
+                image_artifacts += dequantized_pred
+
+        if is_train:
+            model.train()
 
         return audio_artifacts, image_artifacts

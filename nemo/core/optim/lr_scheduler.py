@@ -1045,6 +1045,7 @@ AVAILABLE_SCHEDULERS = {
     'WarmupHoldPolicy': WarmupHoldPolicy,
     'SquareAnnealing': SquareAnnealing,
     'CosineAnnealing': CosineAnnealing,
+    'CosineAnnealingWarmRestarts': pt_scheduler.CosineAnnealingWarmRestarts,
     'NoamAnnealing': NoamAnnealing,
     'NoamHoldAnnealing': NoamHoldAnnealing,
     'WarmupHoldAnnealOneMinusSquareRoot': WarmupHoldAnnealOneMinusSquareRoot,
