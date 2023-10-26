@@ -104,14 +104,26 @@ class DiscreteSpeechModel(ModelPT):
 
         # Infilling hyperparameters
         self.audio_infill_min = cfg.get("audio_infill_min", 0.05)
-        self.audio_infill_max = cfg.get("audio_infill_max", 0.5)
+        self.audio_infill_max = cfg.get("audio_infill_max", 1.0)
         audio_infill_beta = cfg.get("audio_infill_beta", 2.0)
         self.audio_infill_dist = torch.distributions.beta.Beta(concentration1=1.0, concentration0=audio_infill_beta)
 
         self.duration_infill_min = cfg.get("duration_infill_min", 0.05)
-        self.duration_infill_max = cfg.get("duration_infill_max", 0.5)
+        self.duration_infill_max = cfg.get("duration_infill_max", 1.0)
         duration_infill_beta = cfg.get("duration_infill_beta", 2.0)
         self.duration_infill_dist = torch.distributions.beta.Beta(concentration1=1.0, concentration0=duration_infill_beta)
+
+        # Audio denoising hyperparemters
+        self.audio_noise_percent_min = cfg.get("audio_noise_percent_min", 0.0)
+        self.audio_noise_percent_max = cfg.get("audio_noise_percent_max", 0.3)
+        audio_noise_beta = cfg.get("audio_noise_beta", 2.0)
+        self.audio_noise_dist = torch.distributions.beta.Beta(concentration1=1.0, concentration0=audio_noise_beta)
+
+        # Duration denoising hyperparemters
+        self.duration_noise_percent_min = cfg.get("duration_noise_percent_min", 0.0)
+        self.duration_noise_percent_max = cfg.get("duration_noise_percent_max", 0.3)
+        duration_noise_beta = cfg.get("duration_noise_beta", 2.0)
+        self.duration_noise_dist = torch.distributions.beta.Beta(concentration1=1.0, concentration0=duration_noise_beta)
 
         # Rate at which noise is added to ground truth alignment seen by the decoder
         self.decoder_duration_noise_percent = cfg.get("decoder_duration_noise_percent", 0.3)
@@ -184,9 +196,41 @@ class DiscreteSpeechModel(ModelPT):
         infill_mask = infill_vals >= infill_min_val
 
         infill_mask = infill_mask * len_mask
-        infill_loss_mask = ~infill_mask * len_mask
 
-        return infill_mask, infill_loss_mask
+        return infill_mask
+
+    def _add_audio_noise(self, audio_codes, mask):
+        batch_size = audio_codes.shape[0]
+        num_frames = audio_codes.shape[2]
+        mask_3d = rearrange(mask, 'B T -> B 1 T')
+        # [B, 1, 1]
+        batch_noise_percent = self.audio_noise_dist.sample(sample_shape=torch.Size([batch_size, 1, 1])).to(audio_codes.device)
+        batch_noise_percent = self.audio_noise_percent_min + (self.audio_noise_percent_max - self.audio_noise_percent_min) * batch_noise_percent
+        # [B, 1, T]
+        time_noise_percent = torch.rand(size=torch.Size([batch_size, 1, num_frames]), device=audio_codes.device)
+        noise_percent = batch_noise_percent * time_noise_percent
+        add_noise = torch.rand(size=audio_codes.shape, device=audio_codes.device) < noise_percent
+        noise_mask = mask_3d * add_noise
+
+        noise = torch.randint(low=0, high=4, size=audio_codes.shape, device=audio_codes.device)
+        noise = noise / 2.0 - 1.0
+
+        audio_codes_noise = torch.where(noise_mask, noise, audio_codes)
+        return audio_codes_noise
+
+    def _add_duration_noise(self, dur_indices, mask):
+        batch_size = dur_indices.shape[0]
+        # [B, 1]
+        noise_percent = self.duration_noise_dist.sample(sample_shape=torch.Size([batch_size, 1])).to(dur_indices.device)
+        noise_percent = self.duration_noise_percent_min + (self.duration_noise_percent_max - self.duration_noise_percent_min) * noise_percent
+        add_noise = torch.rand(size=dur_indices.shape, device=dur_indices.device) < noise_percent
+        noise_mask = mask * add_noise
+
+        noise = torch.randint(low=0, high=self.max_token_duration, size=dur_indices.shape, device=dur_indices.device)
+
+        dur_indices_noise = torch.where(noise_mask, noise, dur_indices)
+
+        return dur_indices_noise
 
     def _add_decoder_duration_noise(self, durs, text_lens):
         max_text_len = durs.shape[1]
@@ -509,7 +553,6 @@ class DiscreteSpeechModel(ModelPT):
             "audio_tokens": NeuralType(('B', 'C', 'T_audio'), TokenIndex()),
             "audio_token_lens": NeuralType(tuple('B'), LengthsType()),
             "sample_context": NeuralType((), BoolType(), optional=True),
-            "add_duration_noise": NeuralType((), BoolType(), optional=True),
         },
         output_types={
             "audio_token_sample": NeuralType(('B', 'C', 'T_audio'), TokenIndex()),
@@ -518,14 +561,12 @@ class DiscreteSpeechModel(ModelPT):
             "audio_logits": NeuralType(('B', 'C', 'W', 'T_audio'), LogitsType()),
             "audio_tokens_pred_post": NeuralType(('B', 'C', 'T_audio'), TokenIndex()),
             "audio_logits_post": NeuralType(('B', 'C', 'W', 'T_audio'), LogitsType()),
-            "audio_loss_mask": NeuralType(('B', 'T_audio'), MaskType()),
             "dur_indices": NeuralType(('B', 'T_text'), TokenIndex()),
             "dur_lens": NeuralType(tuple('B'), LengthsType()),
             "dur_indices_pred": NeuralType(('B', 'T_text'), TokenIndex()),
             "dur_logits": NeuralType(('B', 'D', 'T_text'), LogitsType()),
             "dur_indices_pred_post": NeuralType(('B', 'T_text'), TokenIndex()),
             "dur_logits_post": NeuralType(('B', 'D', 'T_text'), LogitsType()),
-            "duration_loss_mask": NeuralType(('B', 'T_audio'), MaskType()),
             "speaking_rate_indices": NeuralType(tuple('B'), TokenIndex()),
             "speaking_rate_indices_pred": NeuralType(tuple('B'), TokenIndex()),
             "speaking_rate_logits": NeuralType(('B', 'C'), LogitsType()),
@@ -544,7 +585,6 @@ class DiscreteSpeechModel(ModelPT):
         audio_tokens,
         audio_token_lens,
         sample_context=False,
-        add_duration_noise=False,
     ):
         audio_tokens = self.vector_quantizer_converter.convert_original_to_new(audio_tokens=audio_tokens, audio_lens=audio_token_lens)
         audio_tokens_rearrange = rearrange(audio_tokens, 'B C T -> C B T')
@@ -601,33 +641,32 @@ class DiscreteSpeechModel(ModelPT):
         dur_indices = self.duration_to_index(durs=dur_sample, lengths=dur_lens)
 
         if sample_context:
-            audio_maskin, audio_loss_mask = self.create_infill_mask(
+            audio_maskin = self.create_infill_mask(
                 input_lens=audio_token_sample_lens,
                 dist=self.audio_infill_dist,
                 infill_min=self.audio_infill_min,
                 infill_max=self.audio_infill_max,
             )
-            duration_maskin, duration_loss_mask = self.create_infill_mask(
+            duration_maskin = self.create_infill_mask(
                 input_lens=dur_lens,
                 dist=self.duration_infill_dist,
                 infill_min=self.duration_infill_min,
                 infill_max=self.duration_infill_max,
             )
+            audio_codes_noise = self._add_audio_noise(audio_codes=audio_codes_sample, mask=audio_maskin).detach()
+            dur_indices_noise = self._add_duration_noise(dur_indices=dur_indices, mask=duration_maskin)
+            dur_noise = self._add_decoder_duration_noise(durs=dur_sample, text_lens=dur_lens)
         else:
             audio_maskin = torch.zeros(
                 [audio_codes_sample.shape[0], audio_codes_sample.shape[2]], dtype=torch.bool, device=audio_tokens.device
             )
             # Unmask every 10th element
             audio_maskin[:, ::10] = True
-            audio_loss_mask = mask_sequence_tensor(~audio_maskin, lengths=audio_token_sample_lens)
             duration_maskin = torch.zeros_like(dur_sample, dtype=torch.bool)
             # Unmask every 5th element
             duration_maskin[:, ::5] = True
-            duration_loss_mask = mask_sequence_tensor(~duration_maskin, lengths=dur_lens)
-
-        if add_duration_noise:
-            dur_noise = self._add_decoder_duration_noise(durs=dur_sample, text_lens=dur_lens)
-        else:
+            audio_codes_noise = audio_codes_sample
+            dur_indices_noise = dur_indices
             dur_noise = dur_sample
 
         audio_tokens_pred, audio_token_logits, audio_tokens_pred_post, audio_token_logits_post, \
@@ -639,11 +678,11 @@ class DiscreteSpeechModel(ModelPT):
             context=context,
             context_lens=context_lens,
             speaking_rate=speaking_rate,
-            audio_codes=audio_codes_sample,
+            audio_codes=audio_codes_noise,
             audio_lens=audio_token_sample_lens,
             audio_maskin=audio_maskin,
             durs=dur_noise,
-            dur_indices=dur_indices,
+            dur_indices=dur_indices_noise,
             duration_maskin=duration_maskin,
         )
 
@@ -654,14 +693,12 @@ class DiscreteSpeechModel(ModelPT):
             audio_token_logits,
             audio_tokens_pred_post,
             audio_token_logits_post,
-            audio_loss_mask,
             dur_indices,
             dur_lens,
             dur_indices_pred,
             dur_logits,
             dur_indices_pred_post,
             dur_logits_post,
-            duration_loss_mask,
             speaking_rate_indices,
             speaking_rate_indices_pred,
             speaking_rate_logits,
@@ -680,6 +717,7 @@ class DiscreteSpeechModel(ModelPT):
             "audio_tokens": NeuralType(('B', 'C', 'T_audio'), TokenIndex()),
             "audio_token_lens": NeuralType(tuple('B'), LengthsType()),
             "num_audio_iters": NeuralType((), IntType()),
+            "num_audio_denoise_iters": NeuralType((), IntType()),
             "audio_temperature": NeuralType((), FloatType(), optional=True),
             "audio_topk": NeuralType((), IntType(), optional=True),
         },
@@ -697,6 +735,7 @@ class DiscreteSpeechModel(ModelPT):
         audio_tokens,
         audio_token_lens,
         num_audio_iters=1,
+        num_audio_denoise_iters=0,
         audio_temperature=None,
         audio_topk=None,
     ):
@@ -751,6 +790,7 @@ class DiscreteSpeechModel(ModelPT):
             context=context,
             context_mask=context_mask,
             num_iters=num_audio_iters,
+            num_denoise_iters=num_audio_denoise_iters,
             temperature=audio_temperature,
             topk=audio_topk,
         )
@@ -762,8 +802,6 @@ class DiscreteSpeechModel(ModelPT):
         audio_tokens = batch_dict.get("audio_tokens")
         audio_token_lens = batch_dict.get("audio_token_lens")
 
-        add_duration_noise = self.decoder_duration_noise_percent > 0.0
-
         (
             audio_token_sample,
             audio_token_sample_lens,
@@ -771,14 +809,12 @@ class DiscreteSpeechModel(ModelPT):
             audio_token_logits,
             _,
             audio_token_logits_post,
-            audio_loss_mask,
             dur_indices,
             dur_lens,
             _,
             dur_logits,
             _,
             dur_logits_post,
-            duration_loss_mask,
             speaking_rate_indices,
             _,
             speaking_rate_logits,
@@ -794,7 +830,6 @@ class DiscreteSpeechModel(ModelPT):
             audio_tokens=audio_tokens,
             audio_token_lens=audio_token_lens,
             sample_context=True,
-            add_duration_noise=add_duration_noise,
         )
 
         audio_mask = get_mask_from_lengths(audio_token_sample_lens)
@@ -805,7 +840,7 @@ class DiscreteSpeechModel(ModelPT):
         train_audio_token_loss = self.audio_token_loss_scale * audio_token_loss
 
         audio_token_post_loss = self.audio_token_loss_fn(
-            logits=audio_token_logits_post, target_tokens=audio_token_sample, mask=audio_loss_mask
+            logits=audio_token_logits_post, target_tokens=audio_token_sample, mask=audio_mask
         )
         train_audio_token_post_loss = self.audio_token_loss_scale * audio_token_post_loss
 
@@ -814,7 +849,7 @@ class DiscreteSpeechModel(ModelPT):
         duration_loss = self.duration_loss_fn(logits=dur_logits, target_index=dur_indices.detach(), mask=dur_mask)
         train_dur_loss = self.duration_loss_scale * duration_loss
 
-        duration_post_loss = self.duration_loss_fn(logits=dur_logits_post, target_index=dur_indices.detach(), mask=duration_loss_mask)
+        duration_post_loss = self.duration_loss_fn(logits=dur_logits_post, target_index=dur_indices.detach(), mask=dur_mask)
         train_dur_post_loss = self.duration_loss_scale * duration_post_loss
 
         speaking_rate_loss = self.speaking_rate_loss_fn(logits=speaking_rate_logits, target_index=speaking_rate_indices.detach())
@@ -874,14 +909,12 @@ class DiscreteSpeechModel(ModelPT):
             audio_token_logits,
             audio_tokens_pred_post,
             audio_token_logits_post,
-            audio_loss_mask,
             dur_indices,
             dur_lens,
             dur_indices_pred,
             dur_logits,
             dur_indices_pred_post,
             dur_logits_post,
-            duration_loss_mask,
             speaking_rate_indices,
             speaking_rate_indices_pred,
             speaking_rate_logits,
@@ -904,33 +937,33 @@ class DiscreteSpeechModel(ModelPT):
             logits=audio_token_logits, target_tokens=audio_token_sample, mask=audio_mask
         )
         audio_token_correct = audio_token_sample == audio_tokens_pred
-        audio_token_correct = audio_token_correct * rearrange(audio_mask, 'B T -> B 1 T')
+        audio_token_correct = mask_sequence_tensor(audio_token_correct, audio_token_sample_lens)
         audio_token_accuracy = audio_token_correct.sum() / audio_token_sample_lens.sum() / self.num_codebooks
 
         audio_token_post_loss = self.audio_token_loss_fn(
-            logits=audio_token_logits_post, target_tokens=audio_token_sample, mask=audio_loss_mask,
+            logits=audio_token_logits_post, target_tokens=audio_token_sample, mask=audio_mask
         )
         audio_token_correct_post = audio_token_sample == audio_tokens_pred_post
-        audio_token_correct_post = audio_token_correct_post * rearrange(audio_loss_mask, 'B T -> B 1 T')
-        audio_token_post_accuracy = audio_token_correct_post.sum() / audio_loss_mask.sum() / self.num_codebooks
+        audio_token_correct_post = mask_sequence_tensor(audio_token_correct_post, audio_token_sample_lens)
+        audio_token_post_accuracy = audio_token_correct_post.sum() / audio_token_sample_lens.sum() / self.num_codebooks
 
         dur_mask = get_mask_from_lengths(dur_lens)
 
         duration_loss = self.duration_loss_fn(
             logits=dur_logits,
             target_index=dur_indices,
-            mask=duration_loss_mask,
+            mask=dur_mask
         )
-        dur_token_correct = (dur_indices == dur_indices_pred) * dur_mask
-        dur_token_accuracy = dur_token_correct.sum() / dur_lens.sum()
+        dur_token_correct = mask_sequence_tensor(dur_indices == dur_indices_pred, dur_lens).sum()
+        dur_token_accuracy = dur_token_correct / dur_lens.sum()
 
         duration_post_loss = self.duration_loss_fn(
             logits=dur_logits_post,
             target_index=dur_indices,
-            mask=duration_loss_mask,
+            mask=dur_mask
         )
-        dur_token_correct_post = (dur_indices == dur_indices_pred_post) * duration_loss_mask
-        dur_token_post_accuracy = dur_token_correct_post.sum() / duration_loss_mask.sum()
+        dur_token_correct_post = mask_sequence_tensor(dur_indices == dur_indices_pred_post, dur_lens).sum()
+        dur_token_post_accuracy = dur_token_correct_post / dur_lens.sum()
 
         speaking_rate_loss = self.speaking_rate_loss_fn(logits=speaking_rate_logits, target_index=speaking_rate_indices)
         speaking_rate_correct = (speaking_rate_indices == speaking_rate_indices_pred)
@@ -1037,6 +1070,7 @@ class DiscreteSpeechModel(ModelPT):
             "context": NeuralType(('B', 'T_context', 'D'), EncodedRepresentation()),
             "context_mask": NeuralType(('B', 'T_context'), MaskType()),
             "num_iters": NeuralType((), IntType()),
+            "num_denoise_iters": NeuralType((), IntType()),
             "temperature": NeuralType((), FloatType(), optional=True),
             "topk": NeuralType((), IntType(), optional=True),
         },
@@ -1045,7 +1079,7 @@ class DiscreteSpeechModel(ModelPT):
         }
     )
     def _audio_token_infer(
-        self, inputs, audio_lens, context, context_mask, num_iters, temperature=None, topk=None,
+        self, inputs, audio_lens, context, context_mask, num_iters, num_denoise_iters, temperature=None, topk=None,
     ):
         # [B, T]
         audio_mask = get_mask_from_lengths(audio_lens)
@@ -1094,16 +1128,34 @@ class DiscreteSpeechModel(ModelPT):
             # [B, T]
             maskin_i = one_hot.sum(dim=1).bool()
             maskin_i = torch.where(audio_mask, maskin_i, False)
-            maskin_i = torch.where(audio_maskin, False, maskin_i)
-            maskin_3d_i = rearrange(maskin_i, 'B T -> B T 1')
+            audio_maskin = torch.logical_or(audio_maskin, maskin_i)
+            maskin_3d_i = rearrange(audio_maskin, 'B T -> B T 1')
 
             audio_tokens = torch.where(maskin_3d_i, audio_tokens_i, audio_tokens)
             audio_codes = torch.where(maskin_3d_i, audio_codes_i, audio_codes)
 
-            audio_maskin = torch.logical_or(audio_maskin, maskin_i)
-
         audio_maskin_3d = rearrange(audio_maskin, 'B T -> B T 1')
         audio_tokens = torch.where(audio_maskin_3d, audio_tokens, audio_tokens_i)
+        audio_codes = torch.where(audio_maskin_3d, audio_codes, audio_codes_i)
+
+        remask_rate = 0.0
+        for _ in range(num_denoise_iters):
+            remask = torch.rand(size=audio_maskin.shape, device=inputs.device) < remask_rate
+            audio_maskin_i = audio_maskin * ~remask
+            audio_tokens, _ = self.audio_decoder(
+                inputs=inputs,
+                audio_mask=audio_mask,
+                context=context,
+                context_mask=context_mask,
+                audio_codes=audio_codes,
+                audio_maskin=audio_maskin_i,
+            )
+            audio_tokens = rearrange(audio_tokens, 'B C T -> B T C')
+            audio_tokens_rearrange = rearrange(audio_tokens, 'B T C -> C B T')
+            # [B, D, T]
+            audio_codes = self.vector_quantizer.decode(indices=audio_tokens_rearrange, input_len=audio_lens)
+            audio_codes = rearrange(audio_codes, 'B D T -> B T D')
+
         audio_tokens = rearrange(audio_tokens, 'B T C -> B C T')
         audio_tokens = self.vector_quantizer_converter.convert_new_to_original(audio_tokens=audio_tokens, audio_lens=audio_lens)
 
@@ -1117,6 +1169,7 @@ class DiscreteSpeechModel(ModelPT):
             "context": NeuralType(('B', 'T_context', 'D'), EncodedRepresentation()),
             "context_mask": NeuralType(('B', 'T_context'), MaskType()),
             "num_iters": NeuralType((), IntType()),
+            "num_denoise_iters": NeuralType((), IntType()),
             "temperature": NeuralType((), FloatType(), optional=True),
             "topk": NeuralType((), IntType(), optional=True),
         },
@@ -1126,7 +1179,7 @@ class DiscreteSpeechModel(ModelPT):
         }
     )
     def _duration_infer(
-        self, inputs, text_lens, context, context_mask, num_iters, temperature=None, topk=None
+        self, inputs, text_lens, context, context_mask, num_iters, num_denoise_iters, temperature=None, topk=None
     ):
         # [B, T]
         text_mask = get_mask_from_lengths(text_lens)
@@ -1164,12 +1217,25 @@ class DiscreteSpeechModel(ModelPT):
             # [B, T]
             maskin_i = one_hot.sum(dim=1).bool()
             maskin_i = torch.where(text_mask, maskin_i, False)
-            maskin_i = torch.where(duration_maskin, False, maskin_i)
-            dur_indices = torch.where(maskin_i, dur_indices_i, dur_indices)
-
             duration_maskin = torch.logical_or(duration_maskin, maskin_i)
 
+            dur_indices = torch.where(duration_maskin, dur_indices_i, dur_indices)
+
         dur_indices = torch.where(duration_maskin, dur_indices, dur_indices_i)
+
+        remask_rate = 0.0
+        for _ in range(num_denoise_iters):
+            remask = torch.rand(size=duration_maskin.shape, device=inputs.device) < remask_rate
+            duration_maskin_i = duration_maskin * ~remask
+            dur_indices, _ = self.duration_decoder(
+                inputs=inputs,
+                dur_indices=dur_indices,
+                text_mask=text_mask,
+                duration_maskin=duration_maskin_i,
+                context=context,
+                context_mask=context_mask,
+            )
+
         durs = self.index_to_duration(dur_indices=dur_indices, mask=text_mask)
 
         return durs, dur_indices
@@ -1293,9 +1359,11 @@ class DiscreteSpeechModel(ModelPT):
             "context": NeuralType(('B', 'D', 'T_context'), EncodedRepresentation()),
             "context_lens": NeuralType(tuple('B'), LengthsType()),
             "num_audio_iters": NeuralType((), IntType(), optional=True),
+            "num_audio_denoise_iters": NeuralType((), IntType(), optional=True),
             "audio_topk": NeuralType((), IntType(), optional=True),
             "audio_temperature": NeuralType((), FloatType(), optional=True),
             "num_duration_iters": NeuralType((), IntType(), optional=True),
+            "num_duration_denoise_iters": NeuralType((), IntType(), optional=True),
             "duration_topk": NeuralType((), IntType(), optional=True),
             "duration_temperature": NeuralType((), FloatType(), optional=True),
             "speaking_rate": NeuralType(tuple('B'), FloatType(), optional=True),
@@ -1316,9 +1384,11 @@ class DiscreteSpeechModel(ModelPT):
         context,
         context_lens,
         num_audio_iters=1,
+        num_audio_denoise_iters=0,
         audio_topk=None,
         audio_temperature=None,
         num_duration_iters=1,
+        num_duration_denoise_iters=0,
         duration_topk=None,
         duration_temperature=None,
         speaking_rate=None,
@@ -1349,6 +1419,7 @@ class DiscreteSpeechModel(ModelPT):
             context=context,
             context_mask=context_mask,
             num_iters=num_duration_iters,
+            num_denoise_iters=num_duration_denoise_iters,
             temperature=duration_temperature,
             topk=duration_topk,
         )
@@ -1370,6 +1441,7 @@ class DiscreteSpeechModel(ModelPT):
             context=context,
             context_mask=context_mask,
             num_iters=num_audio_iters,
+            num_denoise_iters=num_audio_denoise_iters,
             temperature=audio_temperature,
             topk=audio_topk,
         )

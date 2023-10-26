@@ -770,9 +770,11 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
         log_dequantized: bool = False,
         log_alignment: bool = False,
         num_audio_iters: int = 1,
+        num_audio_denoise_iters: int = 0,
         audio_topk: int = 1,
         audio_temperature: float = 1.0,
         num_duration_iters: int = 1,
+        num_duration_denoise_iters: int = 0,
         duration_topk: int = 1,
         duration_temperature: float = 1.0,
     ) -> None:
@@ -781,9 +783,11 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
         self.log_dequantized = log_dequantized
         self.log_alignment = log_alignment
         self.num_audio_iters = num_audio_iters
+        self.num_audio_denoise_iters =  num_audio_denoise_iters
         self.audio_topk = audio_topk
         self.audio_temperature = audio_temperature
         self.num_duration_iters = num_duration_iters
+        self.num_duration_denoise_iters = num_duration_denoise_iters
         self.duration_topk = duration_topk
         self.duration_temperature = duration_temperature
         self.audio_codec = _load_vocoder(
@@ -859,9 +863,11 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
                 context=context,
                 context_lens=context_lens,
                 num_audio_iters=self.num_audio_iters,
+                num_audio_denoise_iters=self.num_audio_denoise_iters,
                 audio_topk=self.audio_topk,
                 audio_temperature=self.audio_temperature,
                 num_duration_iters=self.num_duration_iters,
+                num_duration_denoise_iters=self.num_duration_denoise_iters,
                 duration_topk=self.duration_topk,
                 duration_temperature=self.duration_temperature,
             )
@@ -901,6 +907,7 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
                 audio_tokens=audio_tokens,
                 audio_token_lens=audio_token_lens,
                 num_audio_iters=self.num_audio_iters,
+                num_audio_denoise_iters=self.num_audio_denoise_iters,
                 audio_temperature=self.audio_temperature,
                 audio_topk=self.audio_topk,
             )

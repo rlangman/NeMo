@@ -23,6 +23,7 @@ from hydra.utils import instantiate
 from lightning.pytorch import Trainer
 from omegaconf import DictConfig, OmegaConf, open_dict
 
+from nemo.collections.common.parts.utils import mask_sequence_tensor
 from nemo.collections.tts.losses.audio_codec_loss import (
     FeatureMatchingLoss,
     MultiResolutionMelLoss,
@@ -500,6 +501,7 @@ class AudioCodecModel(ModelPT):
                 waveform=audio, orig_freq=sample_rate, new_freq=self.sample_rate
             )
             audio_len = torch.ceil(audio_len / sample_rate * self.sample_rate).int()
+            audio = mask_sequence_tensor(audio, audio_len)
 
         audio, audio_len = self.pad_audio(audio=audio, audio_len=audio_len, samples_per_frame=self.samples_per_frame)
         return audio, audio_len
