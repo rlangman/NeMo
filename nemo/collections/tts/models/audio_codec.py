@@ -151,6 +151,13 @@ class AudioCodecModel(ModelPT):
         else:
             raise ValueError(f'Unknown feature loss type {feature_loss_type}.')
 
+        if "mmd_loss" in cfg:
+            self.mmd_loss_fn = instantiate(cfg.mmd_loss)
+            self.mmd_loss_scale = cfg.get("mmd_loss_scale", 1.0)
+        else:
+            self.mmd_loss_fn = None
+            self.mmd_loss_scale = None
+
         # Codebook loss setup
         if self.vector_quantizer:
             self.commit_loss_scale = cfg.get("commit_loss_scale", 1.0)
@@ -470,7 +477,7 @@ class AudioCodecModel(ModelPT):
         # [B, T]
         audio_gen, _ = self.audio_decoder(inputs=encoded, input_len=encoded_len)
 
-        return audio, audio_len, audio_gen, commit_loss
+        return audio, audio_len, audio_gen, commit_loss, encoded
 
     @property
     def disc_update_prob(self) -> float:
@@ -487,7 +494,7 @@ class AudioCodecModel(ModelPT):
     def training_step(self, batch, batch_idx):
         optim_gen, optim_disc = self.optimizers()
 
-        audio, audio_len, audio_gen, commit_loss = self._process_batch(batch)
+        audio, audio_len, audio_gen, commit_loss, codes = self._process_batch(batch)
 
         metrics = {
             "global_step": self.global_step,
@@ -547,6 +554,11 @@ class AudioCodecModel(ModelPT):
             metrics["g_loss_commit"] = commit_loss
             generator_losses.append(self.commit_loss_scale * commit_loss)
 
+        if self.mmd_loss_scale:
+            loss_mmd = self.mmd_loss_fn(codes=codes)
+            metrics["g_loss_mmd"] = loss_mmd
+            generator_losses.append(self.mmd_loss_scale * loss_mmd)
+
         # compute embeddings for speaker consistency loss
         if self.use_scl_loss:
             # concate generated and GT waveforms
@@ -592,7 +604,7 @@ class AudioCodecModel(ModelPT):
         self.update_lr("epoch")
 
     def validation_step(self, batch, batch_idx):
-        audio, audio_len, audio_gen, _ = self._process_batch(batch)
+        audio, audio_len, audio_gen, _, _ = self._process_batch(batch)
 
         loss_mel_l1, loss_mel_l2 = self.mel_loss_fn(audio_real=audio, audio_gen=audio_gen, audio_len=audio_len)
         loss_stft = self.stft_loss_fn(audio_real=audio, audio_gen=audio_gen, audio_len=audio_len)
