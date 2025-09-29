@@ -549,9 +549,7 @@ class MMDLoss(Loss):
 
     @property
     def output_types(self):
-        return {
-            "loss": NeuralType(elements_type=LossType())
-        }
+        return {"loss": NeuralType(elements_type=LossType())}
 
     @typecheck()
     def forward(self, inputs):
@@ -616,9 +614,7 @@ class MMDCodebookLoss(Loss):
 
     @property
     def output_types(self):
-        return {
-            "loss": NeuralType(elements_type=LossType())
-        }
+        return {"loss": NeuralType(elements_type=LossType())}
 
     @typecheck()
     def forward(self, inputs):
@@ -652,9 +648,7 @@ class MMDEmbeddingLoss(Loss):
 
     @property
     def output_types(self):
-        return {
-            "loss": NeuralType(elements_type=LossType())
-        }
+        return {"loss": NeuralType(elements_type=LossType())}
 
     @typecheck()
     def forward(self, inputs):
@@ -684,9 +678,7 @@ class MMDTimeLoss(Loss):
 
     @property
     def output_types(self):
-        return {
-            "loss": NeuralType(elements_type=LossType())
-        }
+        return {"loss": NeuralType(elements_type=LossType())}
 
     @typecheck()
     def forward(self, inputs):
