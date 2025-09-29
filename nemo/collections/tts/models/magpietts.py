@@ -102,8 +102,10 @@ class MagpieTTSModel(ModelPT):
         # del codec discriminator to free memory
         del codec_model.discriminator
 
+        # When using FSQ tokens, the codebook structure can be changed at any time.
+        # An FSQ definition can be provided in `vector_quantizer` config to train with a codebook structure
+        # that is different than in the audio codec checkpoint.
         vector_quantizer = cfg.get('vector_quantizer')
-        # Set up codebook configuration
         if vector_quantizer is not None:
             vector_quantizer = instantiate(vector_quantizer)
             self.num_audio_codebooks = vector_quantizer.num_codebooks
@@ -2331,7 +2333,7 @@ class MagpieTTSModel(ModelPT):
                 all_codes_next_argmax = self.sample_codes_from_logits(
                     all_code_logits_t,
                     temperature=0.01,
-                    topk=topk,
+                    topk=1,
                     unfinished_items=unfinished_items,
                     finished_items=finished_items,
                 )  # (B, num_codebooks, frame_stacking_factor)

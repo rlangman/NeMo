@@ -1639,7 +1639,8 @@ class ResidualBlockV2(NeuralModule):
         kernel_size: Kernel size of the residual convolutions.
         activation: Activation to apply in between residual convolutions.
         is_causal:  Whether to use causal convolutions.
-        pad_mode: Type of padding to use.
+        pad_mode: Type of padding to use for conv1d layers.
+            See https://docs.pytorch.org/docs/stable/generated/torch.nn.Conv1d.html
     """
 
     def __init__(
@@ -2652,7 +2653,7 @@ class STFTResidualBlock(NeuralModule):
         self.spec_act = CodecActivation(activation=activation, channels=filters)
 
         self.res_block = ResidualBlockV2(
-            channels=filters, filters=filters, kernel_size=kernel_size, activation=activation
+            channels=filters, filters=filters, kernel_size=kernel_size, activation=activation, pad_mode=pad_mode
         )
 
     def remove_weight_norm(self):
@@ -2766,7 +2767,8 @@ class MultiResolutionSTFTEncoder(NeuralModule):
         activation: Name of activation function.
         resample_rates: Optional tuple of two integers. If provided, input audio will be resampled from sampling rate
             resample_rates[0] to sampling rate resample_rates[1].
-        pad_mode: Type of padding to use.
+        pad_mode: Type of padding to use for conv1d layers.
+            See https://docs.pytorch.org/docs/stable/generated/torch.nn.Conv1d.html
     """
 
     def __init__(
@@ -2968,7 +2970,8 @@ class ResNetDecoder(NeuralModule):
         kernel_size: Kernel size to use in all other CNN layers.
         activation: Name of activation to use in residual blocks.
         is_causal: Whether to make the decoder causal.
-        pad_mode: Type of padding to use.
+        pad_mode: Type of padding to use for conv1d layers.
+            See https://docs.pytorch.org/docs/stable/generated/torch.nn.Conv1d.html
     """
 
     def __init__(
@@ -3106,11 +3109,11 @@ class ResNetDecoder(NeuralModule):
         for conv in self.conv_layers:
             out = conv(inputs=out, input_len=audio_len)
 
-        for resblock_up_sample_rate, reblock_up_sample_layer, resblock in zip(
+        for resblock_up_sample_rate, resblock_up_sample_layer, resblock in zip(
             self.resblock_up_sample_rates, self.resblock_up_sample_layers, self.resblocks
         ):
             audio_len = resblock_up_sample_rate * audio_len
-            out = reblock_up_sample_layer(inputs=out, input_len=audio_len)
+            out = resblock_up_sample_layer(inputs=out, input_len=audio_len)
             out = resblock(inputs=out, input_len=audio_len)
 
         out = self.post_conv(inputs=out, input_len=audio_len)
