@@ -1667,9 +1667,15 @@ class ResidualBlockV2(NeuralModule):
             )
         else:
             self.input_conv = CausalConv1dNorm(
-                in_channels=channels, out_channels=filters, kernel_size=kernel_size, activation=activation
+                in_channels=channels,
+                out_channels=filters,
+                kernel_size=kernel_size,
+                activation=activation,
+                pad_mode=pad_mode,
             )
-            self.skip_conv = CausalConv1dNorm(in_channels=filters, out_channels=channels, kernel_size=kernel_size)
+            self.skip_conv = CausalConv1dNorm(
+                in_channels=filters, out_channels=channels, kernel_size=kernel_size, pad_mode=pad_mode
+            )
 
         self.output_activation = CodecActivation(activation=activation, channels=channels)
 
@@ -2382,7 +2388,7 @@ class STFTProcessor(NeuralModule):
         log_guard: Value to add to magnitude STFT before taking log.
     """
 
-    def __init__(self, n_fft, win_length, hop_length, log_guard=1.0):
+    def __init__(self, n_fft, win_length, hop_length, log_guard=1.0, pad_mode="reflect"):
         super(STFTProcessor, self).__init__()
 
         self.n_fft = n_fft
@@ -2391,6 +2397,7 @@ class STFTProcessor(NeuralModule):
         self.register_buffer("window", torch.hann_window(self.win_length, periodic=False))
         self.log_guard = log_guard
         self.stft_pad_amount = (self.n_fft - self.hop_length) // 2
+        self.pad_mode = pad_mode
 
     @property
     def input_types(self):
@@ -2409,7 +2416,7 @@ class STFTProcessor(NeuralModule):
     @typecheck()
     def forward(self, audio, audio_len):
         spec_len = audio_len // self.hop_length
-        audio_padded = torch.nn.functional.pad(audio, (self.stft_pad_amount, self.stft_pad_amount), "reflect")
+        audio_padded = torch.nn.functional.pad(audio, (self.stft_pad_amount, self.stft_pad_amount), self.pad_mode)
         # [B, n_fft, T_spec]
         fft = torch.stft(
             audio_padded,
@@ -2648,8 +2655,12 @@ class STFTResidualBlock(NeuralModule):
 
         n_fft, hop_length, win_length = resolution
         stft_dim = n_fft // 2 + 1
-        self.spec_processor = STFTProcessor(n_fft=n_fft, win_length=win_length, hop_length=hop_length)
-        self.spec_conv = Conv1dNorm(in_channels=stft_dim, out_channels=filters, kernel_size=kernel_size)
+        self.spec_processor = STFTProcessor(
+            n_fft=n_fft, win_length=win_length, hop_length=hop_length, pad_mode=pad_mode
+        )
+        self.spec_conv = Conv1dNorm(
+            in_channels=stft_dim, out_channels=filters, kernel_size=kernel_size, pad_mode=pad_mode
+        )
         self.spec_act = CodecActivation(activation=activation, channels=filters)
 
         self.res_block = ResidualBlockV2(
@@ -2724,7 +2735,7 @@ class DownSampleResidualBlock(NeuralModule):
             pad_mode=pad_mode,
         )
         self.res_block = ResidualBlockV2(
-            channels=filters, filters=filters, kernel_size=kernel_size, activation=activation
+            channels=filters, filters=filters, kernel_size=kernel_size, activation=activation, pad_mode=pad_mode
         )
 
     def remove_weight_norm(self):
@@ -2801,7 +2812,9 @@ class MultiResolutionSTFTEncoder(NeuralModule):
         n_fft, hop_length, win_length = resolutions[0]
         input_filters = resolution_filter_list[0]
         input_dim = n_fft // 2 + 1
-        self.pre_spec_processor = STFTProcessor(n_fft=n_fft, win_length=win_length, hop_length=hop_length)
+        self.pre_spec_processor = STFTProcessor(
+            n_fft=n_fft, win_length=win_length, hop_length=hop_length, pad_mode=pad_mode
+        )
         self.pre_conv = Conv1dNorm(
             in_channels=input_dim,
             out_channels=input_filters,
