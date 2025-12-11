@@ -22,8 +22,10 @@ import torch.utils.data
 import torch
 import soundfile as sf
 
+import torchaudio
 from nemo.collections.asr.data.audio_to_text import expand_sharded_filepaths
 from nemo.collections.asr.parts.utils.manifest_utils import read_manifest
+from nemo.collections.common.parts.utils import mask_sequence_tensor
 from nemo.collections.tts.parts.preprocessing.feature_processors import FeatureProcessor
 from nemo.collections.tts.parts.utils.tarred_dataset_utils import (
     create_tarred_dataset,
@@ -82,7 +84,7 @@ def create_vocoder_dataset(
         raise ValueError(f"Unknown dataset type {dataset_type}")
 
 
-def vocoder_collate_fn(batch: List[dict], feature_processors: List[FeatureProcessor]):
+def vocoder_collate_fn(batch: List[dict], feature_processors: List[FeatureProcessor], resample_rates=None):
     dataset_name_list = []
     audio_filepath_list = []
     audio_list = []
@@ -98,6 +100,13 @@ def vocoder_collate_fn(batch: List[dict], feature_processors: List[FeatureProces
     audio_max_len = int(batch_audio_len.max().item())
 
     batch_audio = stack_tensors(audio_list, max_lens=[audio_max_len])
+
+    if resample_rates:
+        batch_audio = torchaudio.functional.resample(
+            waveform=batch_audio, orig_freq=resample_rates[0], new_freq=resample_rates[1]
+        )
+        batch_audio_len = torch.ceil(batch_audio_len / resample_rates[0] * resample_rates[1]).int()
+        batch_audio = mask_sequence_tensor(batch_audio, batch_audio_len)
 
     batch_dict = {
         "dataset_names": dataset_name_list,
@@ -166,6 +175,7 @@ class VocoderDataset(Dataset):
         self,
         dataset_meta: Dict,
         sample_rate: int,
+        resample_rate: Optional[int] = None,
         n_samples: Optional[int] = None,
         weighted_sampling_steps_per_epoch: Optional[int] = None,
         feature_processors: Optional[Dict[str, FeatureProcessor]] = None,
@@ -177,6 +187,12 @@ class VocoderDataset(Dataset):
         super().__init__()
 
         self.sample_rate = sample_rate
+        if resample_rate and sample_rate != resample_rate:
+            self.resample_rates = [sample_rate, resample_rate]
+        else:
+            self.resample_rates = None
+
+
         self.n_samples = n_samples
         self.trunc_duration = trunc_duration
         self.volume_norm = volume_norm
@@ -252,7 +268,7 @@ class VocoderDataset(Dataset):
         return example
 
     def collate_fn(self, batch: List[dict]):
-        return vocoder_collate_fn(batch, feature_processors=self.feature_processors)
+        return vocoder_collate_fn(batch, feature_processors=self.feature_processors, resample_rates=self.resample_rates)
 
 
 class TarredVocoderDataset(IterableDataset):
@@ -318,6 +334,7 @@ class TarredVocoderDataset(IterableDataset):
         self,
         dataset_meta: Dict,
         sample_rate: int,
+        resample_rate: Optional[int] = None,
         sample_type: str = "concat",
         sample_args: Optional[Dict] = None,
         n_samples: Optional[int] = None,
@@ -334,6 +351,11 @@ class TarredVocoderDataset(IterableDataset):
     ):
         super().__init__()
         self.sample_rate = sample_rate
+        if resample_rate and sample_rate != resample_rate:
+            self.resample_rates = [sample_rate, resample_rate]
+        else:
+            self.resample_rates = None
+
         self.n_samples = n_samples
         self.volume_norm = volume_norm
         self.load_precomputed_mel = False
@@ -462,7 +484,7 @@ class TarredVocoderDataset(IterableDataset):
         return None
 
     def collate_fn(self, batch):
-        return vocoder_collate_fn(batch, feature_processors=self.feature_processors)
+        return vocoder_collate_fn(batch, feature_processors=self.feature_processors, resample_rates=self.resample_rates)
 
     def __iter__(self):
         return self.dataset.__iter__()
