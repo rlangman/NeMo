@@ -112,6 +112,18 @@ class AudioCodecModel(ModelPT):
         # Discriminator setup
         self.discriminator = instantiate(cfg.discriminator)
 
+        semantic_codec_path = cfg.get("semantic_codec_path")
+        if semantic_codec_path:
+            semantic_codec_path = self.register_artifact('semantic_codec_path', semantic_codec_path)
+            semantic_codec = AudioCodecModel.restore_from(semantic_codec_path)
+            del semantic_codec.audio_decoder
+            del semantic_codec.discriminator
+            semantic_codec.freeze()
+            semantic_codec.eval()
+            self.semantic_codec = semantic_codec
+        else:
+            self.semantic_codec = None
+
         # Mel loss setup
         loss_resolutions = cfg.loss_resolutions
         mel_loss_dims = cfg.get("mel_loss_dims")
@@ -296,8 +308,14 @@ class AudioCodecModel(ModelPT):
         Returns:
             Encoder output `encoded` and its length in number of frames `encoded_len`
         """
-        audio, audio_len = self.preprocess_audio(audio=audio, audio_len=audio_len, sample_rate=sample_rate)
-        encoded, encoded_len = self.audio_encoder(audio=audio, audio_len=audio_len)
+        audio_preprocessed, audio_preprocessed_len = self.preprocess_audio(audio=audio, audio_len=audio_len, sample_rate=sample_rate)
+        encoded, encoded_len = self.audio_encoder(audio=audio_preprocessed, audio_len=audio_preprocessed_len)
+
+        if self.semantic_codec is not None:
+            semantic, _ = self.semantic_codec.encode_audio(audio=audio, audio_len=audio_len, sample_rate=sample_rate)
+            semantic = semantic.detach()
+            encoded = torch.concat([semantic, encoded], dim=1)
+
         return encoded, encoded_len
 
     @typecheck(
