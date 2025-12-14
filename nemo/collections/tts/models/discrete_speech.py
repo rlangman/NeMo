@@ -1394,7 +1394,8 @@ class DiscreteSpeechModel(ModelPT):
         speaking_rate=None,
         silence_pad_start=2,
         silence_pad_end=1,
-        min_speaking_rate=-0.7
+        min_speaking_rate=-0.5,
+        max_speaking_rate=0.5,
     ):
         # [batch_size, context_len]
         context_mask = get_mask_from_lengths(context_lens)
@@ -1404,7 +1405,7 @@ class DiscreteSpeechModel(ModelPT):
         if speaking_rate is None:
             speaking_rate_indices, _ = self.speaking_rate_predictor(context_emb=context_emb)
             speaking_rate = self.speaking_rate_quantizer.get_codes(indices=speaking_rate_indices)
-            speaking_rate = torch.clamp_min(speaking_rate, min=min_speaking_rate)
+            speaking_rate = torch.clamp(speaking_rate, min=min_speaking_rate, max=max_speaking_rate)
 
         # [batch_size, text_len, hidden_dim]
         text_enc, dur_lens = self.text_encoder(text=text, text_lens=text_lens, context_emb=context_emb)
