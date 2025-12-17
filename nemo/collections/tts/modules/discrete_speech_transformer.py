@@ -18,9 +18,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from einops import rearrange
-from nemo.collections.tts.modules.discrete_speech_modules import DropoutWithoutScaling
 from nemo.collections.tts.modules.transformer import PositionalEmbedding
-from nemo.collections.tts.parts.utils.helpers import get_mask_from_lengths, regulate_len
+from nemo.collections.tts.parts.utils.helpers import get_mask_from_lengths
 from nemo.core.classes import NeuralModule, typecheck
 from nemo.core.neural_types.elements import EncodedRepresentation, LengthsType, MaskType
 from nemo.core.neural_types.neural_type import NeuralType
@@ -554,7 +553,7 @@ class AudioEncoder(NeuralModule):
     def input_types(self):
         return {
             "text_enc": NeuralType(('B', 'T_audio', 'D'), EncodedRepresentation()),
-            "durs": NeuralType(('B', 'T_input'), MaskType()),
+            "audio_mask": NeuralType(('B', 'T_audio'), MaskType()),
             "context": NeuralType(('B', 'T_context', 'D'), EncodedRepresentation()),
             "context_mask": NeuralType(('B', 'T_context'), MaskType()),
         }
@@ -562,14 +561,11 @@ class AudioEncoder(NeuralModule):
     @property
     def output_types(self):
         return {
-            "out": NeuralType(('B', 'T', 'D'), EncodedRepresentation()),
-
+            "audio_enc": NeuralType(('B', 'T', 'D'), EncodedRepresentation()),
         }
 
-    def forward(self, text_enc, durs, context, context_mask):
+    def forward(self, text_enc, audio_mask, context, context_mask):
         audio_enc = self.input_layer(text_enc)
-        audio_enc, audio_lens = regulate_len(durs, audio_enc, pace=1.0)
-        audio_mask = get_mask_from_lengths(audio_lens)
 
         max_audio_len = audio_mask.shape[1]
         pos_seq = torch.arange(max_audio_len, device=audio_enc.device).to(audio_enc.dtype)
@@ -581,7 +577,7 @@ class AudioEncoder(NeuralModule):
             inputs=audio_enc, audio_mask=audio_mask, context=context, context_mask=context_mask
         )
 
-        return audio_enc, audio_lens
+        return audio_enc
 
 
 class DurationTransformer(NeuralModule):
@@ -655,17 +651,13 @@ class DurationTransformer(NeuralModule):
 
 
 class DurationEncoder(NeuralModule):
-    def __init__(self, input_dim, transformer, speaking_rate_dropout_rate=0.0):
+    def __init__(self, input_dim, transformer):
         super(DurationEncoder, self).__init__()
 
         hidden_dim = transformer.d_model
         self.input_layer = torch.nn.Linear(input_dim, hidden_dim)
         self.speaking_rate_cond_layer = torch.nn.Linear(1, hidden_dim)
         self.transformer = transformer
-        if speaking_rate_dropout_rate:
-            self.speaking_rate_dropout = DropoutWithoutScaling(speaking_rate_dropout_rate)
-        else:
-            self.speaking_rate_dropout = torch.nn.Identity()
 
 
     @property
@@ -687,7 +679,6 @@ class DurationEncoder(NeuralModule):
         speaking_rate = rearrange(speaking_rate, 'B -> B 1 1')
         # [B, T, hidden_dim]
         sr_res = self.speaking_rate_cond_layer(speaking_rate)
-        sr_res = self.speaking_rate_dropout(sr_res)
 
         dur_enc = self.input_layer(text_enc)
         dur_enc = dur_enc + sr_res

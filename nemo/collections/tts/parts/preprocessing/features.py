@@ -421,10 +421,6 @@ class AudioCodecFeatureReader(NumpyFeatureReader):
             Feature array
         """
         feature_dict = super().load(manifest_entry=manifest_entry, audio_dir=audio_dir, feature_dir=feature_dir)
-
-        feature_val = feature_dict[self.feature_name].astype(np.int32)
-        feature_dict[self.feature_name] = np.where(feature_val < 0, 2**16 + feature_val, feature_val)
-
         feature_dict[self.feature_len_field] = feature_dict[self.feature_name].shape[0]
         return feature_dict
 
@@ -432,7 +428,7 @@ class AudioCodecFeatureReader(NumpyFeatureReader):
         token_list = []
         token_len_list = []
         for example in train_batch:
-            token_array = example[self.feature_name]
+            token_array = example[self.feature_name].astype(np.int32)
             token_len = example[self.feature_len_field]
             token_tensor = torch.from_numpy(token_array)
             token_tensor = rearrange(token_tensor, 'T C -> C T')

@@ -769,6 +769,7 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
         log_audio_gta: bool = False,
         log_dequantized: bool = False,
         log_alignment: bool = False,
+        log_semantic: bool = False,
         num_audio_iters: int = 1,
         num_audio_denoise_iters: int = 0,
         audio_topk: int = 1,
@@ -782,6 +783,7 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
         self.log_audio_gta = log_audio_gta
         self.log_dequantized = log_dequantized
         self.log_alignment = log_alignment
+        self.log_semantic = log_semantic
         self.num_audio_iters = num_audio_iters
         self.num_audio_denoise_iters =  num_audio_denoise_iters
         self.audio_topk = audio_topk
@@ -817,6 +819,22 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
                     data=audio_gt_i,
                     filepath=audio_gt_path,
                     sample_rate=audio_codec.output_sample_rate,
+                )
+                audio_artifacts.append(audio_artifact)
+
+        if self.log_semantic:
+            with torch.no_grad():
+                semantic_tokens = audio_tokens[:, :1, :]
+                audio, audio_lens = audio_codec.semantic_codec.decode(tokens=semantic_tokens, tokens_len=audio_token_lens)
+
+            for i, (dataset_name, audio_id) in enumerate(zip(dataset_names, audio_ids)):
+                audio_gt_path = Path(f"{dataset_name}/{audio_id}_gt_semantic.wav")
+                audio_gt_i = audio[i, : audio_lens[i]].cpu().numpy()
+                audio_artifact = AudioArtifact(
+                    id=f"audio_gt_semantic_{audio_id}",
+                    data=audio_gt_i,
+                    filepath=audio_gt_path,
+                    sample_rate=audio_codec.semantic_codec.output_sample_rate,
                 )
                 audio_artifacts.append(audio_artifact)
 
@@ -884,6 +902,23 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
                     data=audio_pred_i,
                     filepath=audio_pred_path,
                     sample_rate=audio_codec.output_sample_rate,
+                )
+                audio_artifacts.append(audio_artifact)
+
+        if self.log_semantic:
+            with torch.no_grad():
+                semantic_tokens_pred = audio_tokens_pred[:, :1, :]
+                # [B, T_audio]
+                audio_pred, audio_pred_lens = audio_codec.semantic_codec.decode(tokens=semantic_tokens_pred, tokens_len=audio_token_lens)
+
+            for i, (dataset_name, audio_id) in enumerate(zip(dataset_names, audio_ids)):
+                audio_pred_path = Path(f"{dataset_name}/{audio_id}_semantic.wav")
+                audio_pred_i = audio_pred[i][: audio_pred_lens[i]].cpu().numpy()
+                audio_artifact = AudioArtifact(
+                    id=f"audio_semantic_{audio_id}",
+                    data=audio_pred_i,
+                    filepath=audio_pred_path,
+                    sample_rate=audio_codec.semantic_codec.output_sample_rate,
                 )
                 audio_artifacts.append(audio_artifact)
 

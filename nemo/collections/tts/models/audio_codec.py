@@ -116,7 +116,7 @@ class AudioCodecModel(ModelPT):
         if semantic_codec_path:
             semantic_codec_path = self.register_artifact('semantic_codec_path', semantic_codec_path)
             semantic_codec = AudioCodecModel.restore_from(semantic_codec_path)
-            del semantic_codec.audio_decoder
+            #del semantic_codec.audio_decoder
             del semantic_codec.discriminator
             semantic_codec.freeze()
             semantic_codec.eval()

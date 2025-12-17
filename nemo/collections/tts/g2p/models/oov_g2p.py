@@ -2,7 +2,7 @@ from g2p_en import G2p
 from phonecodes import phonecodes
 import nltk
 
-nltk.download("averaged_perceptron_tagger")
+nltk.download("averaged_perceptron_tagger_eng")
 
 g2p = G2p()
 

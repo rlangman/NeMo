@@ -168,33 +168,12 @@ class Aligner(NeuralModule):
         return durations, text_lens, attn_hard, attn_soft, attn_logprob
 
 
-class DropoutWithoutScaling(torch.nn.Module):
-    """
-    """
-
-    def __init__(self, dropout_rate):
-        super(DropoutWithoutScaling, self).__init__()
-        self.dropout_rate = dropout_rate
-
-    def forward(self, inputs):
-        if not self.training:
-            return inputs
-
-        mask = torch.rand(size=inputs.shape, device=inputs.device) >= self.dropout_rate
-        out = torch.where(mask, inputs, torch.zeros_like(inputs))
-        return out
-
-
 class PreNet(NeuralModule):
 
-    def __init__(self, input_dim, output_dim, dropout_rate=0.0):
+    def __init__(self, input_dim, output_dim):
         super(PreNet, self).__init__()
         self.hidden_layer = torch.nn.Linear(input_dim, output_dim)
         self.output_layer = torch.nn.Linear(output_dim, output_dim)
-        if dropout_rate:
-            self.dropout = DropoutWithoutScaling(dropout_rate)
-        else:
-            self.dropout = torch.nn.Identity()
 
     @property
     def input_types(self):
@@ -213,9 +192,36 @@ class PreNet(NeuralModule):
     def forward(self, inputs, mask):
         out = self.hidden_layer(inputs)
         out = self.output_layer(out)
-        out = self.dropout(out)
         out = out * rearrange(mask, 'B T -> B T 1')
         return out
+
+
+class SemanticConditioningLayer(NeuralModule):
+
+    def __init__(self, input_dim, output_dim):
+        super(SemanticConditioningLayer, self).__init__()
+        self.pre_net = PreNet(input_dim=input_dim, output_dim=output_dim)
+
+    @property
+    def input_types(self):
+        return {
+            "inputs": NeuralType(('B', 'T', 'D'), EncodedRepresentation()),
+            "semantic_codes": NeuralType(('B', 'T', 'C'), EncodedRepresentation()),
+            "audio_mask": NeuralType(('B', 'T'), MaskType()),
+        }
+
+    @property
+    def output_types(self):
+        return {
+            "out": NeuralType(('B', 'T', 'C'), EncodedRepresentation()),
+        }
+
+    @typecheck()
+    def forward(self, inputs, semantic_codes, audio_mask):
+        res = self.pre_net(inputs=semantic_codes, mask=audio_mask)
+        out = inputs + res
+        return out
+
 
 
 class ContextEncoder(NeuralModule):
