@@ -71,8 +71,8 @@ class DiscreteSpeechModel(ModelPT):
         self.max_token_duration = cfg.get("max_token_duration")
 
         # Context length in terms of number of audio tokens
-        self.context_min_len = cfg.get("context_min_len", 128)
-        self.context_max_len = cfg.get("context_max_len", 256)
+        self.context_min_len = cfg.get("context_min_len", 50)
+        self.context_max_len = cfg.get("context_max_len", 125)
 
         # Quantizer definitions
         self.num_codebooks = cfg.get("num_codebooks")
@@ -324,12 +324,17 @@ class DiscreteSpeechModel(ModelPT):
         for i in range(batch_size):
             context_start_i = context_starts[i].item()
             context_end_i = context_ends[i].item()
+            context_len_i = context_lens[i].item()
             text_start_i = text_starts[i].item()
             text_end_i = text_ends[i].item()
             audio_start_i = audio_starts[i].item()
             audio_end_i = audio_ends[i].item()
 
             context_i = audio_codes[i, :, context_start_i:context_end_i]
+            if context_i.shape[1] < self.context_max_len:
+                num_repeats = int(math.ceil(self.context_max_len / context_len_i))
+                context_i = torch.tile(context_i, dims=(1, num_repeats))
+                context_i = context_i[:, :self.context_max_len]
 
             text_i = text[i, text_start_i:text_end_i]
             dur_i = durs[i, text_start_i:text_end_i]
@@ -343,8 +348,8 @@ class DiscreteSpeechModel(ModelPT):
             target_audio_token_list.append(audio_tokens_i)
             target_audio_code_list.append(audio_codes_i)
 
-        max_context_len = context_lens.max().item()
-        context_codes = stack_tensors(tensors=context_list, max_lens=[max_context_len]).to(audio_codes.device)
+        context_codes = stack_tensors(tensors=context_list, max_lens=[self.context_max_len]).to(audio_codes.device)
+        context_output_lens = self.context_max_len * torch.ones_like(context_lens)
 
         max_text_len = target_text_lens.max().item()
         target_text = stack_tensors(tensors=target_text_list, max_lens=[max_text_len]).to(audio_codes.device)
@@ -356,7 +361,7 @@ class DiscreteSpeechModel(ModelPT):
         target_audio_codes = stack_tensors(tensors=target_audio_code_list, max_lens=[max_audio_len]).to(
             audio_codes.device)
 
-        return context_codes, target_text, target_durs, target_audio_tokens, target_audio_codes
+        return context_codes, context_output_lens, target_text, target_durs, target_audio_tokens, target_audio_codes
 
     def sample_context_audio_start(self, audio_tokens, audio_codes, audio_lens, text, durs, text_lens, random_sample):
         batch_size = audio_codes.shape[0]
@@ -383,7 +388,7 @@ class DiscreteSpeechModel(ModelPT):
         target_audio_lens = torch.maximum(target_audio_lens, target_text_lens)
 
         zero_starts = torch.zeros(batch_size, dtype=torch.int32)
-        context_codes, target_text, target_durs, target_audio_tokens, target_audio_codes = \
+        context_codes, context_lens, target_text, target_durs, target_audio_tokens, target_audio_codes = \
             self._slice_context_information(
                 text=text,
                 durs=durs,
@@ -428,7 +433,7 @@ class DiscreteSpeechModel(ModelPT):
         target_audio_lens = torch.maximum(target_audio_lens, target_text_lens)
 
         zero_starts = torch.zeros(batch_size, dtype=torch.int32)
-        context_codes, target_text, target_durs, target_audio_tokens, target_audio_codes = \
+        context_codes, context_lens, target_text, target_durs, target_audio_tokens, target_audio_codes = \
             self._slice_context_information(
                 text=text,
                 durs=durs,

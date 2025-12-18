@@ -66,6 +66,9 @@ def get_args():
         "--model_path", type=Path, help="Path to checkpoint to load.",
     )
     parser.add_argument(
+        "--sample_rate", required=True, type=int, help="Sample rate of input audio.",
+    )
+    parser.add_argument(
         "--volume_norm",
         action=argparse.BooleanOptionalAction,
         help="Whether to normalize volume of audio before computing tokens.",
@@ -83,14 +86,15 @@ def get_args():
     return args
 
 
-def _process_batch(entries, audio_codec, audio_dir, feature_dir, feature_name, volume_norm):
+def _process_batch(entries, audio_codec, audio_dir, feature_dir, feature_name, input_sample_rate, volume_norm):
     audio_list = []
     audio_len_list = []
     for entry in entries:
         audio_array, _, _ = load_audio(
             manifest_entry=entry,
             audio_dir=audio_dir,
-            sample_rate=audio_codec.sample_rate,
+            #sample_rate=audio_codec.sample_rate,
+            sample_rate=input_sample_rate,
             volume_norm=volume_norm,
         )
         audio = torch.from_numpy(audio_array)
@@ -103,7 +107,7 @@ def _process_batch(entries, audio_codec, audio_dir, feature_dir, feature_name, v
 
     with torch.no_grad():
         # [batch_size, num_codebook, T_token]
-        tokens, token_lens = audio_codec.encode(audio=audio, audio_len=audio_len)
+        tokens, token_lens = audio_codec.encode(audio=audio, audio_len=audio_len, sample_rate=input_sample_rate)
         tokens = tokens.cpu().numpy().astype(np.int16)
         #tokens = tokens.cpu().numpy().astype(np.int32)
         token_lens = token_lens.cpu().numpy()
@@ -160,6 +164,7 @@ def main():
     feature_name = args.feature_name
     model_name = args.model_name
     model_path = args.model_path
+    sample_rate = args.sample_rate
     volume_norm = args.volume_norm
     device = args.device
     batch_size = args.batch_size
@@ -203,7 +208,9 @@ def main():
                 audio_dir=audio_dir,
                 feature_dir=feature_dir,
                 feature_name=feature_name,
-                volume_norm=volume_norm)
+                input_sample_rate=sample_rate,
+                volume_norm=volume_norm,
+            )
             batch_list = []
 
     if batch_list:
@@ -213,6 +220,7 @@ def main():
             audio_dir=audio_dir,
             feature_dir=feature_dir,
             feature_name=feature_name,
+            input_sample_rate=sample_rate,
             volume_norm=volume_norm
         )
 
