@@ -41,6 +41,7 @@ from nemo.collections.tts.parts.utils.tarred_dataset_utils import (
 from nemo.collections.tts.parts.utils.tts_dataset_utils import (
     _read_audio,
     beta_binomial_prior_distribution,
+    dropout_pc,
     filter_dataset,
     get_audio_filepaths,
     get_weighted_sampler,
@@ -188,11 +189,13 @@ class TextToSpeechDataset(Dataset):
         min_duration: Optional[float] = None,
         max_duration: Optional[float] = None,
         min_words: Optional[int] = None,
+        pc_dropout_rate: Optional[float] = None,
     ):
         super().__init__()
 
         self.text_tokenizer = text_tokenizer
         self.weighted_sampling_steps_per_epoch = weighted_sampling_steps_per_epoch
+        self.pc_dropout_rate = pc_dropout_rate
 
         if speaker_path:
             self.include_speaker = True
@@ -270,6 +273,8 @@ class TextToSpeechDataset(Dataset):
                 text = entry["normalized_text"]
             else:
                 text = entry["text"]
+
+            text = dropout_pc(text=text, dropout_rate=self.pc_dropout_rate)
 
             if self.include_speaker:
                 speaker = entry["speaker"]
@@ -358,10 +363,12 @@ class TarredTextToSpeechDataset(IterableDataset):
         shard_strategy: str = "scatter",
         global_rank: int = 0,
         world_size: int = 0,
+        pc_dropout_rate: float = 0.0,
     ):
         super().__init__()
         self.text_tokenizer = text_tokenizer
         self.volume_norm = volume_norm
+        self.pc_dropout_rate = pc_dropout_rate
 
         if speaker_path:
             self.include_speaker = True
@@ -477,6 +484,8 @@ class TarredTextToSpeechDataset(IterableDataset):
             text = entry["normalized_text"]
         else:
             text = entry["text"]
+
+        text = dropout_pc(text=text, dropout_rate=self.pc_dropout_rate)
 
         tokens = self.text_tokenizer(text)
         tokens = torch.tensor(tokens, dtype=torch.int32)

@@ -15,7 +15,7 @@
 import functools
 import os
 import random
-import re
+import string
 import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -28,10 +28,6 @@ from scipy import ndimage
 from torch.special import gammaln
 
 from nemo.collections.asr.parts.preprocessing.segment import AudioSegment
-from nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers import BaseTokenizer
-
-LEADING_PUNCT_REG = r'^[^a-zA-Z]+ '
-TRAILING_PUNCT_REG = r' [^a-zA-Z]+$'
 
 
 def get_abs_rel_paths(input_path: Path, base_path: Path) -> Tuple[Path, Path]:
@@ -403,3 +399,22 @@ def sample_audio(
         audio = normalize_volume(audio)
 
     return audio, audio_filepath_abs, audio_filepath_rel
+
+
+def dropout_pc(text, dropout_rate):
+    if not dropout_rate:
+        return text
+
+    output_text = ""
+    for char in text:
+        if char not in string.punctuation or random.random() > dropout_rate:
+            output_text += char
+        else:
+            output_text += " "
+
+    output_text = " ".join(output_text.split())
+
+    if random.random() < dropout_rate:
+        output_text = output_text.lower()
+
+    return output_text
