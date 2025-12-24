@@ -53,6 +53,7 @@ class IpaG2p(BaseG2p):
         grapheme_case: Optional[str] = GRAPHEME_CASE_UPPER,
         grapheme_prefix: Optional[str] = "",
         mapping_file: Optional[str] = None,
+        use_automatic_g2p: bool = False,
     ) -> None:
         """
         Generic IPA G2P module. This module converts words from graphemes to International Phonetic Alphabet
@@ -120,7 +121,10 @@ class IpaG2p(BaseG2p):
         else:
             raise ValueError(f"{phoneme_dict} contains no entries!")
 
-        if apply_to_oov_word is None:
+        if use_automatic_g2p:
+            from nemo.collections.tts.g2p.models.oov_g2p import convert_to_ipa
+            apply_to_oov_word = convert_to_ipa
+        elif apply_to_oov_word is None:
             logging.warning(
                 "apply_to_oov_word=None, This means that some of words will remain unchanged "
                 "if they are not handled by any of the rules in self.parse_one_word(). "

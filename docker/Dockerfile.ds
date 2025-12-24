@@ -133,6 +133,9 @@ RUN INSTALL_MSG=$(/bin/bash /tmp/nemo/scripts/installers/install_k2.sh); INSTALL
 # install torch
 RUN pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
 
+RUN pip install g2p_en
+RUN pip install phonecodes
+
 # install nemo dependencies
 WORKDIR /tmp/nemo
 ENV LHOTSE_REQUIRE_TORCHAUDIO=0
