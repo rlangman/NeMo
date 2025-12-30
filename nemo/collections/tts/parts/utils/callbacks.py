@@ -775,7 +775,6 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
         audio_topk: int = 1,
         audio_temperature: float = 1.0,
         num_duration_iters: int = 1,
-        num_duration_denoise_iters: int = 0,
         duration_topk: int = 1,
         duration_temperature: float = 1.0,
     ) -> None:
@@ -789,7 +788,6 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
         self.audio_topk = audio_topk
         self.audio_temperature = audio_temperature
         self.num_duration_iters = num_duration_iters
-        self.num_duration_denoise_iters = num_duration_denoise_iters
         self.duration_topk = duration_topk
         self.duration_temperature = duration_temperature
         self.audio_codec = _load_vocoder(
@@ -885,7 +883,6 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
                 audio_topk=self.audio_topk,
                 audio_temperature=self.audio_temperature,
                 num_duration_iters=self.num_duration_iters,
-                num_duration_denoise_iters=self.num_duration_denoise_iters,
                 duration_topk=self.duration_topk,
                 duration_temperature=self.duration_temperature,
             )
