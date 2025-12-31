@@ -496,7 +496,7 @@ class AudioCodecModel(ModelPT):
             Padded time-domain signal `padded_audio` and its length `padded_len`.
         """
         num_frames = audio_len / samples_per_frame
-        # Avoid calling torch.ceil when the length is divisible by the frame rate, as torch.ceil will still round up depending on precision
+        # To avoid rounding issues at lower precisions, do not call torch.ceil when the length is divisible by the frame rate
         num_frames = torch.where(audio_len % samples_per_frame == 0, num_frames, torch.ceil(num_frames))
         padded_len = samples_per_frame * num_frames.int()
         max_len = padded_len.max().item()
@@ -510,7 +510,11 @@ class AudioCodecModel(ModelPT):
                 raise ModuleNotFoundError("Must install torchaudio for resampling.")
 
             audio = torchaudio.functional.resample(waveform=audio, orig_freq=sample_rate, new_freq=self.sample_rate)
-            audio_len = torch.ceil(audio_len / sample_rate * self.sample_rate).int()
+            audio_len_scaled = audio_len.long() * self.sample_rate
+            new_audio_len = audio_len_scaled / sample_rate
+            # To avoid rounding issues at lower precisions, do not call torch.ceil when the length is divisible by the sample rate
+            audio_len = torch.where(audio_len_scaled % sample_rate == 0, new_audio_len, torch.ceil(new_audio_len))
+            audio_len = audio_len.int()
             audio = mask_sequence_tensor(audio, audio_len)
 
         audio, audio_len = self.pad_audio(audio=audio, audio_len=audio_len, samples_per_frame=self.samples_per_frame)

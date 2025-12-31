@@ -222,7 +222,8 @@ class MagpieTTSLhotseDataset(torch.utils.data.Dataset):
                 # Note that we have segmented the audio according to offset and duration so that the audio codes should
                 # not specify start and duration again when calling TemporalArray.load(start, duration). Ensure start
                 # and duration are None to the load function.
-                audio_codes = torch.from_numpy(cut.target_codes.load())  # (C, T)
+                audio_codes_array = cut.target_codes.load().astype(np.int32)
+                audio_codes = torch.from_numpy(audio_codes_array)  # (C, T)
                 audio_codes_len = audio_codes.shape[1]
                 spec_len = audio_codes_len + 1  # +1 for EOS
                 audio_codes_list.append(audio_codes.T)  # transpose to (T, C) to use collate_matrices to process batch.
@@ -249,7 +250,8 @@ class MagpieTTSLhotseDataset(torch.utils.data.Dataset):
                 # Note that we have segmented the audio according to offset and duration so that the audio codes should
                 # not specify start and duration again when calling TemporalArray.load(start, duration). Ensure start
                 # and duration are None to the load function.
-                context_audio_codes = torch.from_numpy(cut.context_codes.load())  # (C, T)
+                context_audio_codes_array = cut.context_codes.load().astype(np.int32)
+                context_audio_codes = torch.from_numpy(context_audio_codes_array)  # (C, T)
                 # Sample random duration between self.context_duration_min and self.context_duration_max
                 _context_duration_to_slice = random.uniform(self.context_duration_min, self.context_duration_max)
                 _num_frames_to_slice = int(
