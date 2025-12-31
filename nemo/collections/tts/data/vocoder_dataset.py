@@ -38,6 +38,7 @@ from nemo.collections.tts.parts.utils.tts_dataset_utils import (
     filter_dataset,
     get_weighted_sampler,
     load_audio,
+    resample_batch,
     sample_audio,
     stack_tensors,
 )
@@ -102,11 +103,9 @@ def vocoder_collate_fn(batch: List[dict], feature_processors: List[FeatureProces
     batch_audio = stack_tensors(audio_list, max_lens=[audio_max_len])
 
     if resample_rates:
-        batch_audio = torchaudio.functional.resample(
-            waveform=batch_audio, orig_freq=resample_rates[0], new_freq=resample_rates[1]
+        batch_audio, batch_audio_len = resample_batch(
+            audio=batch_audio, audio_len=batch_audio_len, input_sample_rate=resample_rates[0], output_sample_rate=resample_rates[1]
         )
-        batch_audio_len = torch.ceil(batch_audio_len / resample_rates[0] * resample_rates[1]).int()
-        batch_audio = mask_sequence_tensor(batch_audio, batch_audio_len)
 
     batch_dict = {
         "dataset_names": dataset_name_list,

@@ -28,6 +28,14 @@ from scipy import ndimage
 from torch.special import gammaln
 
 from nemo.collections.asr.parts.preprocessing.segment import AudioSegment
+from nemo.collections.common.parts.utils import mask_sequence_tensor
+
+try:
+    import torchaudio
+
+    HAVE_TORCHAUDIO = True
+except ModuleNotFoundError:
+    HAVE_TORCHAUDIO = False
 
 
 def get_abs_rel_paths(input_path: Path, base_path: Path) -> Tuple[Path, Path]:
@@ -418,3 +426,17 @@ def dropout_pc(text, dropout_rate):
         output_text = output_text.lower()
 
     return output_text
+
+
+def resample_batch(audio, audio_len, input_sample_rate, output_sample_rate):
+    if not HAVE_TORCHAUDIO:
+        raise ModuleNotFoundError("Must install torchaudio for resampling.")
+
+    audio = torchaudio.functional.resample(waveform=audio, orig_freq=input_sample_rate, new_freq=output_sample_rate)
+    audio_len_scaled = audio_len.long() * output_sample_rate
+    new_audio_len = audio_len_scaled / input_sample_rate
+    # To avoid rounding issues at lower precisions, do not call torch.ceil when the length is divisible by the sample rate
+    audio_len = torch.where(audio_len_scaled % input_sample_rate == 0, new_audio_len, torch.ceil(new_audio_len))
+    audio_len = audio_len.int()
+    audio = mask_sequence_tensor(audio, audio_len)
+    return audio, audio_len

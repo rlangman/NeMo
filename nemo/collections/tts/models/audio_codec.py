@@ -37,6 +37,7 @@ from nemo.collections.tts.modules.common import GaussianDropout
 from nemo.collections.tts.data.vocoder_dataset import create_vocoder_dataset
 from nemo.collections.tts.parts.utils.callbacks import LoggingCallback
 from nemo.collections.tts.parts.utils.helpers import get_batch_size, get_num_workers
+from nemo.collections.tts.parts.utils.tts_dataset_utils import resample_batch
 from nemo.core import ModelPT
 from nemo.core.classes.common import PretrainedModelInfo, typecheck
 from nemo.core.neural_types.elements import AudioSignal, EncodedRepresentation, IntType, LengthsType, Optional, TokenIndex
@@ -112,15 +113,19 @@ class AudioCodecModel(ModelPT):
         # Discriminator setup
         self.discriminator = instantiate(cfg.discriminator)
 
-        semantic_codec_path = cfg.get("semantic_codec_path")
-        if semantic_codec_path:
-            semantic_codec_path = self.register_artifact('semantic_codec_path', semantic_codec_path)
+        if cfg.get("semantic_codec"):
+            semantic_codec_cfg = cfg.get("semantic_codec")
+            semantic_codec = AudioCodecModel(cfg=semantic_codec_cfg)
+        elif cfg.get("semantic_codec_path"):
+            semantic_codec_path = cfg.get("semantic_codec_path")
             semantic_codec = AudioCodecModel.restore_from(semantic_codec_path)
-            #del semantic_codec.audio_decoder
-            del semantic_codec.discriminator
-            semantic_codec.freeze()
-            semantic_codec.eval()
-            self.semantic_codec = semantic_codec
+        else:
+            semantic_codec = None
+
+        if semantic_codec is not None:
+            self.register_nemo_submodule(name="semantic_codec", config_field="semantic_codec", model=semantic_codec)
+            self.semantic_codec.freeze()
+            self.semantic_codec.eval()
         else:
             self.semantic_codec = None
 
@@ -308,6 +313,9 @@ class AudioCodecModel(ModelPT):
         Returns:
             Encoder output `encoded` and its length in number of frames `encoded_len`
         """
+        if not sample_rate:
+            sample_rate = self.sample_rate
+
         audio_preprocessed, audio_preprocessed_len = self.preprocess_audio(audio=audio, audio_len=audio_len, sample_rate=sample_rate)
         encoded, encoded_len = self.audio_encoder(audio=audio_preprocessed, audio_len=audio_preprocessed_len)
 
@@ -503,6 +511,7 @@ class AudioCodecModel(ModelPT):
             Padded time-domain signal `padded_audio` and its length `padded_len`.
         """
         num_frames = audio_len / samples_per_frame
+        # Avoid calling torch.ceil when the length is divisible by the frame rate, as torch.ceil will still round up depending on precision
         num_frames = torch.where(audio_len % samples_per_frame == 0, num_frames, torch.ceil(num_frames))
         padded_len = samples_per_frame * num_frames.int()
         max_len = padded_len.max().item()
@@ -511,15 +520,10 @@ class AudioCodecModel(ModelPT):
         return padded_audio, padded_len
 
     def preprocess_audio(self, audio, audio_len, sample_rate):
-        if sample_rate and sample_rate != self.sample_rate:
-            if not HAVE_TORCHAUDIO:
-                raise ModuleNotFoundError("Must install torchaudio for resampling.")
-
-            audio = torchaudio.functional.resample(
-                waveform=audio, orig_freq=sample_rate, new_freq=self.sample_rate
+        if sample_rate != self.sample_rate:
+            audio, audio_len = resample_batch(
+                audio=audio, audio_len=audio_len, input_sample_rate=sample_rate, output_sample_rate=self.sample_rate
             )
-            audio_len = torch.ceil(audio_len / sample_rate * self.sample_rate).int()
-            audio = mask_sequence_tensor(audio, audio_len)
 
         audio, audio_len = self.pad_audio(audio=audio, audio_len=audio_len, samples_per_frame=self.samples_per_frame)
         return audio, audio_len
