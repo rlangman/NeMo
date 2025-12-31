@@ -116,6 +116,11 @@ class DiscreteSpeechModel(ModelPT):
         audio_infill_beta = cfg.get("audio_infill_beta", 2.0)
         self.audio_infill_dist = torch.distributions.beta.Beta(concentration1=1.0, concentration0=audio_infill_beta)
 
+        self.semantic_infill_min = cfg.get("semantic_infill_min", 0.05)
+        self.semantic_infill_max = cfg.get("semantic_infill_max", 0.5)
+        semantic_infill_beta = cfg.get("semantic_infill_beta", 2.0)
+        self.semantic_infill_dist = torch.distributions.beta.Beta(concentration1=1.0, concentration0=semantic_infill_beta)
+
         self.duration_infill_min = cfg.get("duration_infill_min", 0.05)
         self.duration_infill_max = cfg.get("duration_infill_max", 0.5)
         duration_infill_beta = cfg.get("duration_infill_beta", 2.0)
@@ -557,6 +562,7 @@ class DiscreteSpeechModel(ModelPT):
             "semantic_logits": NeuralType(('B', 'C', 'W', 'T_audio'), LogitsType()),
             "semantic_tokens_pred_post": NeuralType(('B', 'C', 'T_audio'), TokenIndex()),
             "semantic_logits_post": NeuralType(('B', 'C', 'W', 'T_audio'), LogitsType()),
+            "semantic_loss_mask": NeuralType(('B', 'T_text'), MaskType()),
             "acoustic_tokens_pred": NeuralType(('B', 'C', 'T_audio'), TokenIndex()),
             "acoustic_logits": NeuralType(('B', 'C', 'W', 'T_audio'), LogitsType()),
             "acoustic_tokens_pred_post": NeuralType(('B', 'C', 'T_audio'), TokenIndex()),
@@ -642,11 +648,11 @@ class DiscreteSpeechModel(ModelPT):
         dur_indices = self.duration_to_index(durs=dur_sample, lengths=dur_lens)
 
         if sample_context:
-            semantic_maskin, _ = self.create_infill_mask(
+            semantic_maskin, semantic_loss_mask = self.create_infill_mask(
                 input_lens=audio_token_sample_lens,
-                dist=self.audio_infill_dist,
-                infill_min=self.audio_infill_min,
-                infill_max=self.audio_infill_max,
+                dist=self.semantic_infill_dist,
+                infill_min=self.semantic_infill_min,
+                infill_max=self.semantic_infill_max,
             )
             acoustic_maskin, _ = self.create_infill_mask(
                 input_lens=audio_token_sample_lens,
@@ -665,11 +671,13 @@ class DiscreteSpeechModel(ModelPT):
             audio_codes_noise = self._add_audio_noise(audio_codes=audio_codes_sample, mask=audio_mask).detach()
             dur_noise = self._add_decoder_duration_noise(durs=dur_sample, text_lens=dur_lens)
         else:
+            audio_mask = get_mask_from_lengths(audio_token_sample_lens)
             semantic_maskin = torch.zeros(
                 [audio_codes_sample.shape[0], audio_codes_sample.shape[2]], dtype=torch.bool, device=audio_tokens.device
             )
             # Unmask every 10th element
             semantic_maskin[:, ::10] = True
+            semantic_loss_mask = ~semantic_maskin * audio_mask
             acoustic_maskin = torch.zeros(
                 [audio_codes_sample.shape[0], audio_codes_sample.shape[2]], dtype=torch.bool, device=audio_tokens.device
             )
@@ -716,6 +724,7 @@ class DiscreteSpeechModel(ModelPT):
             semantic_token_logits,
             semantic_tokens_pred_post,
             semantic_token_logits_post,
+            semantic_loss_mask,
             acoustic_tokens_pred,
             acoustic_token_logits,
             acoustic_tokens_pred_post,
@@ -817,15 +826,12 @@ class DiscreteSpeechModel(ModelPT):
             text_enc=text_enc_repeated, audio_mask=audio_mask, context=context, context_mask=context_mask
         )
         # [B, C_semantic, T], [B, T, D]
-        semantic_tokens, semantic_codes = self._audio_token_infer(
-            decoder=self.semantic_decoder,
-            vector_quantizer=self.vector_quantizer_semantic,
+        semantic_tokens, semantic_codes = self._semantic_token_infer(
             inputs=semantic_enc,
             audio_lens=audio_lens,
             context=context,
             context_mask=context_mask,
             num_iters=num_audio_iters,
-            num_denoise_iters=num_audio_denoise_iters,
             temperature=audio_temperature,
             topk=audio_topk,
         )
@@ -835,9 +841,7 @@ class DiscreteSpeechModel(ModelPT):
             text_enc=text_enc_cond, audio_mask=audio_mask, context=context, context_mask=context_mask
         )
         # [B, C_acoustic, T]
-        acoustic_tokens, _ = self._audio_token_infer(
-            decoder=self.acoustic_decoder,
-            vector_quantizer=self.vector_quantizer_acoustic,
+        acoustic_tokens = self._audio_token_infer(
             inputs=acoustic_enc,
             audio_lens=audio_lens,
             context=context,
@@ -867,6 +871,7 @@ class DiscreteSpeechModel(ModelPT):
             semantic_token_logits,
             _,
             semantic_token_logits_post,
+            semantic_loss_mask,
             _,
             acoustic_token_logits,
             _,
@@ -903,7 +908,7 @@ class DiscreteSpeechModel(ModelPT):
         train_semantic_token_loss = self.audio_token_loss_scale * semantic_token_loss
 
         semantic_token_post_loss = self.semantic_token_loss_fn(
-            logits=semantic_token_logits_post, target_tokens=semantic_token_sample, mask=audio_mask
+            logits=semantic_token_logits_post, target_tokens=semantic_token_sample, mask=semantic_loss_mask
         )
         train_semantic_token_post_loss = self.audio_token_loss_scale * semantic_token_post_loss
 
@@ -985,6 +990,7 @@ class DiscreteSpeechModel(ModelPT):
             semantic_token_logits,
             semantic_tokens_pred_post,
             semantic_token_logits_post,
+            semantic_loss_mask,
             acoustic_tokens_pred,
             acoustic_token_logits,
             acoustic_tokens_pred_post,
@@ -1017,29 +1023,25 @@ class DiscreteSpeechModel(ModelPT):
         semantic_token_loss = self.semantic_token_loss_fn(
             logits=semantic_token_logits, target_tokens=semantic_token_sample, mask=audio_mask
         )
-        semantic_token_correct = semantic_token_sample == semantic_tokens_pred
-        semantic_token_correct = mask_sequence_tensor(semantic_token_correct, audio_token_sample_lens)
+        semantic_token_correct = (semantic_token_sample == semantic_tokens_pred) * rearrange(audio_mask, 'B T -> B 1 T')
         semantic_token_accuracy = semantic_token_correct.sum() / audio_token_sample_lens.sum() / self.semantic_codebook_num
 
         semantic_token_post_loss = self.semantic_token_loss_fn(
-            logits=semantic_token_logits_post, target_tokens=semantic_token_sample, mask=audio_mask
+            logits=semantic_token_logits_post, target_tokens=semantic_token_sample, mask=semantic_loss_mask
         )
-        semantic_token_correct_post = semantic_token_sample == semantic_tokens_pred_post
-        semantic_token_correct_post = mask_sequence_tensor(semantic_token_correct_post, audio_token_sample_lens)
-        semantic_token_post_accuracy = semantic_token_correct_post.sum() / audio_token_sample_lens.sum() / self.semantic_codebook_num
+        semantic_token_correct_post = (semantic_token_sample == semantic_tokens_pred_post) * rearrange(semantic_loss_mask, 'B T -> B 1 T')
+        semantic_token_post_accuracy = semantic_token_correct_post.sum() / semantic_loss_mask.sum() / self.semantic_codebook_num
 
         acoustic_token_loss = self.acoustic_token_loss_fn(
             logits=acoustic_token_logits, target_tokens=acoustic_token_sample, mask=audio_mask
         )
-        acoustic_token_correct = acoustic_token_sample == acoustic_tokens_pred
-        acoustic_token_correct = mask_sequence_tensor(acoustic_token_correct, audio_token_sample_lens)
+        acoustic_token_correct = (acoustic_token_sample == acoustic_tokens_pred) * rearrange(audio_mask, 'B T -> B 1 T')
         acoustic_token_accuracy = acoustic_token_correct.sum() / audio_token_sample_lens.sum() / self.acoustic_codebook_num
 
         acoustic_token_post_loss = self.acoustic_token_loss_fn(
             logits=acoustic_token_logits_post, target_tokens=acoustic_token_sample, mask=audio_mask
         )
-        acoustic_token_correct_post = acoustic_token_sample == acoustic_tokens_pred_post
-        acoustic_token_correct_post = mask_sequence_tensor(acoustic_token_correct_post, audio_token_sample_lens)
+        acoustic_token_correct_post = (acoustic_token_sample == acoustic_tokens_pred_post) * rearrange(audio_mask, 'B T -> B 1 T')
         acoustic_token_post_accuracy = acoustic_token_correct_post.sum() / audio_token_sample_lens.sum() / self.acoustic_codebook_num
 
         dur_mask = get_mask_from_lengths(dur_lens)
@@ -1049,8 +1051,8 @@ class DiscreteSpeechModel(ModelPT):
             target_index=dur_indices,
             mask=dur_mask
         )
-        dur_token_correct = mask_sequence_tensor(dur_indices == dur_indices_pred, dur_lens).sum()
-        dur_token_accuracy = dur_token_correct / dur_lens.sum()
+        dur_token_correct = (dur_indices == dur_indices_pred) * dur_mask
+        dur_token_accuracy = dur_token_correct.sum() / dur_lens.sum()
 
         duration_post_loss = self.duration_loss_fn(
             logits=dur_logits_post,
@@ -1150,10 +1152,81 @@ class DiscreteSpeechModel(ModelPT):
     def list_available_models(cls) -> 'List[PretrainedModelInfo]':
         return []
 
+    def _semantic_token_infer(
+        self,
+        inputs,
+        audio_lens,
+        context,
+        context_mask,
+        num_iters,
+        temperature=None,
+        topk=None,
+    ):
+        # [B, T]
+        audio_mask = get_mask_from_lengths(audio_lens)
+        num_tokens = inputs.shape[1]
+
+        # [T]
+        index_shift = num_iters * torch.arange(0, math.ceil(num_tokens / num_iters), device=inputs.device)
+        index_shift = rearrange(index_shift, 'T -> 1 T')
+
+        # [B, T]
+        audio_maskin = torch.zeros_like(audio_mask, dtype=torch.bool)
+        # [B, T, C]
+        audio_token_shape = [audio_mask.shape[0], audio_mask.shape[1], self.semantic_decoder.num_codebooks]
+        audio_tokens = torch.zeros(audio_token_shape, dtype=torch.int, device=inputs.device)
+        # [B, T, D]
+        audio_code_shape = [audio_mask.shape[0], audio_mask.shape[1], self.semantic_decoder.codebook_dim]
+        audio_codes = torch.zeros(audio_code_shape, dtype=torch.float, device=inputs.device)
+
+        for i in range(num_iters):
+            if i == 0:
+                # [B, C, T], [B, C, W, T]
+                audio_tokens_i, audio_logits = self.semantic_decoder.forward_parallel(
+                    inputs=inputs, audio_mask=audio_mask, temperature=temperature, topk=topk,
+                )
+            else:
+                # [B, C, T], [B, C, W, T]
+                audio_tokens_i, audio_logits = self.semantic_decoder(
+                    inputs=inputs,
+                    audio_mask=audio_mask,
+                    context=context,
+                    context_mask=context_mask,
+                    audio_codes=audio_codes,
+                    audio_maskin=audio_maskin,
+                    temperature=temperature,
+                    topk=topk,
+                )
+            audio_tokens_i = rearrange(audio_tokens_i, 'B C T -> B T C')
+            audio_tokens_rearrange_i = rearrange(audio_tokens_i, 'B T C -> C B T')
+            # [B, D, T]
+            audio_codes_i = self.vector_quantizer_semantic.decode(indices=audio_tokens_rearrange_i, input_len=audio_lens)
+            audio_codes_i = rearrange(audio_codes_i, 'B D T -> B T D')
+
+            top_i = torch.clamp_max(index_shift + i, max=num_tokens - 1)
+            # [B, T // num_iters, T]
+            one_hot = torch.nn.functional.one_hot(top_i, num_classes=num_tokens)
+            # [B, T]
+            maskin_i = one_hot.sum(dim=1).bool()
+            maskin_i = torch.where(audio_mask, maskin_i, False)
+            maskin_i = torch.where(audio_maskin, False, maskin_i)
+            maskin_3d_i = rearrange(maskin_i, 'B T -> B T 1')
+
+            audio_tokens = torch.where(maskin_3d_i, audio_tokens_i, audio_tokens)
+            audio_codes = torch.where(maskin_3d_i, audio_codes_i, audio_codes)
+
+            audio_maskin = torch.logical_or(audio_maskin, maskin_i)
+
+        audio_maskin_3d = rearrange(audio_maskin, 'B T -> B T 1')
+        audio_tokens = torch.where(audio_maskin_3d, audio_tokens, audio_tokens_i)
+        audio_codes = torch.where(audio_maskin_3d, audio_codes, audio_codes_i)
+
+        audio_tokens = rearrange(audio_tokens, 'B T C -> B C T')
+
+        return audio_tokens, audio_codes
+
     def _audio_token_infer(
         self,
-        decoder,
-        vector_quantizer,
         inputs,
         audio_lens,
         context,
@@ -1174,21 +1247,21 @@ class DiscreteSpeechModel(ModelPT):
         # [B, T]
         audio_maskin = torch.zeros_like(audio_mask, dtype=torch.bool)
         # [B, T, C]
-        audio_token_shape = [audio_mask.shape[0], audio_mask.shape[1], decoder.num_codebooks]
+        audio_token_shape = [audio_mask.shape[0], audio_mask.shape[1], self.acoustic_decoder.num_codebooks]
         audio_tokens = torch.zeros(audio_token_shape, dtype=torch.int, device=inputs.device)
         # [B, T, D]
-        audio_code_shape = [audio_mask.shape[0], audio_mask.shape[1], decoder.codebook_dim]
+        audio_code_shape = [audio_mask.shape[0], audio_mask.shape[1], self.acoustic_decoder.codebook_dim]
         audio_codes = torch.zeros(audio_code_shape, dtype=torch.float, device=inputs.device)
 
         for i in range(num_iters):
             if i == 0:
                 # [B, C, T], [B, C, W, T]
-                audio_tokens_i, audio_logits = decoder.forward_parallel(
+                audio_tokens_i, audio_logits = self.acoustic_decoder.forward_parallel(
                     inputs=inputs, audio_mask=audio_mask, temperature=temperature, topk=topk,
                 )
             else:
                 # [B, C, T], [B, C, W, T]
-                audio_tokens_i, audio_logits = decoder(
+                audio_tokens_i, audio_logits = self.acoustic_decoder(
                     inputs=inputs,
                     audio_mask=audio_mask,
                     context=context,
@@ -1201,7 +1274,7 @@ class DiscreteSpeechModel(ModelPT):
             audio_tokens_i = rearrange(audio_tokens_i, 'B C T -> B T C')
             audio_tokens_rearrange_i = rearrange(audio_tokens_i, 'B T C -> C B T')
             # [B, D, T]
-            audio_codes_i = vector_quantizer.decode(indices=audio_tokens_rearrange_i, input_len=audio_lens)
+            audio_codes_i = self.vector_quantizer_acoustic.decode(indices=audio_tokens_rearrange_i, input_len=audio_lens)
             audio_codes_i = rearrange(audio_codes_i, 'B D T -> B T D')
 
             top_i = torch.clamp_max(index_shift + i, max=num_tokens - 1)
@@ -1220,27 +1293,24 @@ class DiscreteSpeechModel(ModelPT):
         audio_tokens = torch.where(audio_maskin_3d, audio_tokens, audio_tokens_i)
         audio_codes = torch.where(audio_maskin_3d, audio_codes, audio_codes_i)
 
-        remask_rate = 0.0
         for _ in range(num_denoise_iters):
-            remask = torch.rand(size=audio_maskin.shape, device=inputs.device) < remask_rate
-            audio_maskin_i = audio_maskin * ~remask
-            audio_tokens, _ = decoder(
+            audio_tokens, _ = self.acoustic_decoder(
                 inputs=inputs,
                 audio_mask=audio_mask,
                 context=context,
                 context_mask=context_mask,
                 audio_codes=audio_codes,
-                audio_maskin=audio_maskin_i,
+                audio_maskin=audio_mask,
             )
             audio_tokens = rearrange(audio_tokens, 'B C T -> B T C')
             audio_tokens_rearrange = rearrange(audio_tokens, 'B T C -> C B T')
             # [B, D, T]
-            audio_codes = vector_quantizer.decode(indices=audio_tokens_rearrange, input_len=audio_lens)
+            audio_codes = self.vector_quantizer_acoustic.decode(indices=audio_tokens_rearrange, input_len=audio_lens)
             audio_codes = rearrange(audio_codes, 'B D T -> B T D')
 
         audio_tokens = rearrange(audio_tokens, 'B T C -> B C T')
 
-        return audio_tokens, audio_codes
+        return audio_tokens
 
     def _duration_infer(
         self, inputs, text_lens, context, context_mask, num_iters, temperature=None, topk=None
@@ -1510,15 +1580,12 @@ class DiscreteSpeechModel(ModelPT):
             text_enc=text_enc_repeated, audio_mask=audio_mask, context=context, context_mask=context_mask
         )
         # [B, C_semantic, T], [B, T, D]
-        semantic_tokens, semantic_codes = self._audio_token_infer(
-            decoder=self.semantic_decoder,
-            vector_quantizer=self.vector_quantizer_semantic,
+        semantic_tokens, semantic_codes = self._semantic_token_infer(
             inputs=semantic_enc,
             audio_lens=audio_lens,
             context=context,
             context_mask=context_mask,
             num_iters=num_audio_iters,
-            num_denoise_iters=num_audio_denoise_iters,
             temperature=audio_temperature,
             topk=audio_topk,
         )
@@ -1528,9 +1595,7 @@ class DiscreteSpeechModel(ModelPT):
             text_enc=text_enc_cond, audio_mask=audio_mask, context=context, context_mask=context_mask
         )
         # [B, C_acoustic, T]
-        acoustic_tokens, _ = self._audio_token_infer(
-            decoder=self.acoustic_decoder,
-            vector_quantizer=self.vector_quantizer_acoustic,
+        acoustic_tokens = self._audio_token_infer(
             inputs=acoustic_enc,
             audio_lens=audio_lens,
             context=context,
