@@ -82,6 +82,7 @@ def create_text_to_speech_dataset(
     global_rank: Optional[int] = None,
     world_size: Optional[int] = None,
     is_train: bool = False,
+    phoneme_probability: float = 1.0,
 ):
     if dataset_args:
         dataset_args = instantiate(dataset_args)
@@ -93,7 +94,7 @@ def create_text_to_speech_dataset(
     elif is_train:
         phoneme_mode = text_tokenizer.set_phone_prob(text_tokenizer.phoneme_probability)
     else:
-        phoneme_mode = text_tokenizer.set_phone_prob(1.0)
+        phoneme_mode = text_tokenizer.set_phone_prob(phoneme_probability)
 
     with phoneme_mode:
         if dataset_type == "default":

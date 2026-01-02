@@ -59,6 +59,7 @@ class DiscreteSpeechModel(ModelPT):
         cfg = model_utils.maybe_update_config_version(cfg)
 
         self.text_tokenizer = self._create_tokenizer(cfg.text_tokenizer)
+        self.inference_phoneme_probability = cfg.get("inference_phoneme_probability", 1.0)
 
         super().__init__(cfg=cfg, trainer=trainer)
 
@@ -73,6 +74,7 @@ class DiscreteSpeechModel(ModelPT):
         # Context length in terms of number of audio tokens
         self.context_min_len = cfg.get("context_min_len", 50)
         self.context_max_len = cfg.get("context_max_len", 125)
+        self.context_len_noise = cfg.get("context_len_noise", 0)
 
         # Quantizer definitions
         self.semantic_codebook_num = cfg.get("semantic_codebook_num")
@@ -382,6 +384,12 @@ class DiscreteSpeechModel(ModelPT):
 
         target_audio_lens = torch.maximum(target_audio_lens, target_text_lens)
 
+        if random_sample:
+            min_context_len = torch.clamp_max(input=context_lens, max=self.context_min_len)
+            context_len_noise = torch.randint_like(input=context_lens, low=0, high=self.context_len_noise + 1)
+            context_lens = context_lens - context_len_noise
+            context_lens = torch.maximum(input=context_lens, other=min_context_len)
+
         zero_starts = torch.zeros(batch_size, dtype=torch.int32)
         context_codes, context_lens, target_text, target_durs, target_audio_tokens, target_audio_codes = \
             self._slice_context_information(
@@ -408,7 +416,7 @@ class DiscreteSpeechModel(ModelPT):
         batch_size = audio_codes.shape[0]
         max_audio_len = audio_tokens.shape[2]
         # [B, 1]
-        context_rand_lens = self._sample_lens(batch_size=batch_size, audio_lens=audio_lens, random_sample=False)
+        context_rand_lens = self._sample_lens(batch_size=batch_size, audio_lens=audio_lens, random_sample=True)
         context_starts = audio_lens - context_rand_lens
         context_starts = rearrange(context_starts, 'B -> B 1')
         space_ends, min_space, max_space = self._find_space_endings(text=text, durs=durs, max_audio_len=max_audio_len)
@@ -427,6 +435,12 @@ class DiscreteSpeechModel(ModelPT):
 
         target_audio_lens = torch.maximum(target_audio_lens, target_text_lens)
 
+        min_context_len = torch.clamp_max(input=context_lens, max=self.context_min_len)
+        context_len_noise = torch.randint_like(input=context_lens, low=0, high=self.context_len_noise + 1)
+        context_lens = context_lens - context_len_noise
+        context_lens = torch.maximum(input=context_lens, other=min_context_len)
+        context_starts = audio_lens - context_lens
+
         zero_starts = torch.zeros(batch_size, dtype=torch.int32)
         context_codes, context_lens, target_text, target_durs, target_audio_tokens, target_audio_codes = \
             self._slice_context_information(
@@ -435,7 +449,7 @@ class DiscreteSpeechModel(ModelPT):
                 audio_tokens=audio_tokens,
                 audio_codes=audio_codes,
                 batch_size=batch_size,
-                context_starts=target_audio_lens,
+                context_starts=context_starts,
                 context_ends=audio_lens,
                 context_lens=context_lens,
                 text_starts=zero_starts,
@@ -1107,7 +1121,8 @@ class DiscreteSpeechModel(ModelPT):
             global_rank=self.trainer.global_rank,
             world_size=self.trainer.world_size,
             dataset_args=dataset_config.dataset_args,
-            is_train=False
+            is_train=False,
+            phoneme_probability=self.inference_phoneme_probability,
         )
         return torch.utils.data.DataLoader(dataset, collate_fn=dataset.collate_fn, **dataloader_params)
 
