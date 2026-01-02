@@ -11,9 +11,6 @@ feature_name: ???
 audio_codec_name: null
 audio_codec_path: null
 
-n_speakers: ???
-speaker_path: null
-
 train_ds_type: ???
 train_ds_meta: ???
 val_ds_meta: ???
@@ -29,13 +26,20 @@ sample_rate: 22050
 
 context_emb_dim: 128
 
-codec_codebook_num: 6
-codec_codebook_levels: [4, 4, 4, 4, 4, 4]
-
-codebook_num: 6
+codebook_num: 7
 codebook_levels: [4, 4, 4, 4, 4, 4]
+codebook_dim: 42
 codebook_size: 4096
-codebook_dim: 36
+
+semantic_codebook_num: 1
+semantic_codebook_dim: 6
+
+acoustic_codebook_num: 6
+acoustic_codebook_dim: 36
+
+acoustic_codebook_train_num: 9
+acoustic_codebook_train_size: 256
+acoustic_codebook_train_levels: [4, 4, 4, 4]
 
 context_min_len: 50
 context_max_len: 125
@@ -54,8 +58,8 @@ feature_readers:
 
 aligner_text_dim: 256
 
-context_hidden_dim: 768
-context_filters: 3072
+context_hidden_dim: 512
+context_filters: 2048
 
 text_hidden_dim: 1024
 text_filters: 4096
@@ -63,8 +67,8 @@ text_filters: 4096
 duration_hidden_dim: 512
 duration_filters: 2048
 
-audio_hidden_dim: 768
-audio_filters: 3072
+audio_hidden_dim: 512
+audio_filters: 2048
 
 model:
   aligner_text_dim: ${aligner_text_dim}
@@ -73,16 +77,30 @@ model:
 
   max_token_duration: ${num_duration}
   num_codebooks: ${codebook_num}
+  semantic_codebook_num: ${semantic_codebook_num}
+  semantic_codebook_dim: ${semantic_codebook_dim}
+  acoustic_codebook_num: ${acoustic_codebook_train_num}
+  acoustic_codebook_dim: ${acoustic_codebook_dim}
 
   vector_quantizer:
     _target_: nemo.collections.tts.modules.audio_codec_modules.GroupFiniteScalarQuantizer
     num_groups: ${codebook_num}
     num_levels_per_group: ${codebook_levels}
 
-  vector_quantizer_codec:
+  vector_quantizer_semantic:
     _target_: nemo.collections.tts.modules.audio_codec_modules.GroupFiniteScalarQuantizer
-    num_groups: ${codec_codebook_num}
-    num_levels_per_group: ${codec_codebook_levels}
+    num_groups: ${semantic_codebook_num}
+    num_levels_per_group: ${codebook_levels}
+
+  vector_quantizer_acoustic:
+    _target_: nemo.collections.tts.modules.audio_codec_modules.GroupFiniteScalarQuantizer
+    num_groups: ${acoustic_codebook_train_num}
+    num_levels_per_group: ${acoustic_codebook_train_levels}
+
+  vector_quantizer_acoustic_codec:
+    _target_: nemo.collections.tts.modules.audio_codec_modules.GroupFiniteScalarQuantizer
+    num_groups: ${acoustic_codebook_num}
+    num_levels_per_group: ${codebook_levels}
 
   text_tokenizer:
     _target_: nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers.IPATokenizer
@@ -100,9 +118,8 @@ model:
     g2p:
       _target_: nemo.collections.tts.g2p.models.i18n_ipa.IpaG2p
       phoneme_dict: ${phoneme_dict_path}
-      #heteronyms: ${heteronyms_path}
-      phoneme_probability: 0.95
-      ignore_ambiguous_words: false
+      heteronyms: ${heteronyms_path}
+      phoneme_probability: 0.8
       use_chars: true
       use_stresses: false
 
@@ -111,8 +128,8 @@ model:
       dataset_type: ${train_ds_type}
       dataset_args:
         dataset_meta: ${train_ds_meta}
-        speaker_path: ${speaker_path}
         feature_readers: ${feature_readers}
+        pc_dropout_rate: 0.1
         min_words: 2
         min_duration: 1.0
         max_duration: 20.1
@@ -126,7 +143,6 @@ model:
       dataset_type: default
       dataset_args:
         dataset_meta: ${val_ds_meta}
-        speaker_path: ${speaker_path}
         feature_readers: ${feature_readers}
         min_words: 2
         min_duration: 1.0
@@ -152,6 +168,7 @@ model:
         log_audio_gta: false
         log_dequantized: false
         log_alignment: false
+        log_semantic: false
         num_audio_iters: 10
         audio_temperature: 1.0
         audio_topk: 1
@@ -163,7 +180,6 @@ model:
       dataset_type: default
       dataset_args:
         dataset_meta: ${log_ds_meta}
-        speaker_path: ${speaker_path}
         feature_readers: ${feature_readers}
 
     dataloader_params:
@@ -192,7 +208,7 @@ model:
     rnn_dim: 512
     encoder:
       _target_: nemo.collections.tts.modules.discrete_speech_transformer.ContextTransformer
-      n_layer: 6
+      n_layer: 8
       n_head: 8
       d_model: ${context_hidden_dim}
       d_head: 64
@@ -217,7 +233,12 @@ model:
     d_inner: ${text_filters}
     kernel_size: 1
 
-  audio_encoder:
+  semantic_cond_layer:
+    _target_: nemo.collections.tts.modules.discrete_speech_modules.SemanticConditioningLayer
+    input_dim: ${semantic_codebook_dim}
+    output_dim: ${text_hidden_dim}
+
+  semantic_encoder:
     _target_: nemo.collections.tts.modules.discrete_speech_transformer.AudioEncoder
     input_dim: ${text_hidden_dim}
     transformer:
@@ -231,14 +252,48 @@ model:
       d_head: 64
       kernel_size: 7
 
-  audio_decoder:
+  semantic_decoder:
     _target_: nemo.collections.tts.modules.discrete_speech_modules.AudioDecoder
-    num_codebooks: ${codebook_num}
+    num_codebooks: ${semantic_codebook_num}
     codebook_size: ${codebook_size}
-    codebook_dim: ${codebook_dim}
+    codebook_dim: ${semantic_codebook_dim}
     pre_net:
       _target_: nemo.collections.tts.modules.discrete_speech_modules.PreNet
-      input_dim: ${codebook_dim}
+      input_dim: ${semantic_codebook_dim}
+      output_dim: ${audio_hidden_dim}
+    fft:
+      _target_: nemo.collections.tts.modules.discrete_speech_transformer.AudioTransformer
+      n_layer: 6
+      n_head_self: 8
+      n_head_context: 8
+      d_model: ${audio_hidden_dim}
+      d_context: ${context_hidden_dim}
+      d_inner: ${audio_filters}
+      d_head: 64
+      kernel_size: 7
+
+  acoustic_encoder:
+    _target_: nemo.collections.tts.modules.discrete_speech_transformer.AudioEncoder
+    input_dim: ${text_hidden_dim}
+    transformer:
+      _target_: nemo.collections.tts.modules.discrete_speech_transformer.AudioTransformer
+      n_layer: 12
+      n_head_self: 8
+      n_head_context: 8
+      d_model: ${audio_hidden_dim}
+      d_context: ${context_hidden_dim}
+      d_inner: ${audio_filters}
+      d_head: 64
+      kernel_size: 7
+
+  acoustic_decoder:
+    _target_: nemo.collections.tts.modules.discrete_speech_modules.AudioDecoder
+    num_codebooks: ${acoustic_codebook_train_num}
+    codebook_size: ${acoustic_codebook_train_size}
+    codebook_dim: ${acoustic_codebook_dim}
+    pre_net:
+      _target_: nemo.collections.tts.modules.discrete_speech_modules.PreNet
+      input_dim: ${acoustic_codebook_dim}
       output_dim: ${audio_hidden_dim}
     fft:
       _target_: nemo.collections.tts.modules.discrete_speech_transformer.AudioTransformer

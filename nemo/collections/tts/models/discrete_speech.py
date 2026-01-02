@@ -84,14 +84,17 @@ class DiscreteSpeechModel(ModelPT):
         self.vector_quantizer = instantiate(cfg.vector_quantizer)
         self.vector_quantizer_semantic = instantiate(cfg.vector_quantizer_semantic)
         self.vector_quantizer_acoustic = instantiate(cfg.vector_quantizer_acoustic)
-        self.speaking_rate_quantizer = instantiate(cfg.speaking_rate_quantizer)
 
-        # Converter between codec codebook structure and model codebook structure
-        vector_quantizer_codec = instantiate(cfg.vector_quantizer_codec)
-        self.vector_quantizer_converter = VectorQuantizerIndexConverter(
-            vector_quantizer_original=vector_quantizer_codec,
-            vector_quantizer_new=self.vector_quantizer,
-        )
+        if "vector_quantizer_acoustic_codec" in cfg:
+            vector_quantizer_acoustic_codec = instantiate(cfg.vector_quantizer_acoustic_codec)
+            self.vector_quantizer_acoustic_converter = VectorQuantizerIndexConverter(
+                vector_quantizer_original=vector_quantizer_acoustic_codec,
+                vector_quantizer_new=self.vector_quantizer_acoustic,
+            )
+        else:
+            self.vector_quantizer_acoustic_converter = None
+
+        self.speaking_rate_quantizer = instantiate(cfg.speaking_rate_quantizer)
 
         # Encoder, decoder definitions
         self.text_encoder = instantiate(cfg.text_encoder, n_embed=num_text_embed, padding_idx=self.text_pad_token)
@@ -181,7 +184,7 @@ class DiscreteSpeechModel(ModelPT):
         if not hasattr(self.text_tokenizer, "set_phone_prob"):
             text_tokens = self.text_tokenizer.encode(str_input)
         else:
-            with self.text_tokenizer.set_phone_prob(prob=1.0):
+            with self.text_tokenizer.set_phone_prob(prob=self.inference_phoneme_probability):
                 text_tokens = self.text_tokenizer.encode(str_input)
 
         token_tensor = torch.tensor(text_tokens).unsqueeze_(0).long().to(self.device)
@@ -506,7 +509,6 @@ class DiscreteSpeechModel(ModelPT):
                audio_codes_sample, audio_token_sample_lens, context_codes, context_lens
 
     def get_context(self, audio_tokens, audio_lens, text, text_lens):
-        audio_tokens = self.vector_quantizer_converter.convert_original_to_new(audio_tokens=audio_tokens, audio_lens=audio_lens)
         audio_tokens_rearrange = rearrange(audio_tokens, 'B C T -> C B T')
         # [batch_size, code_dim, audio_token_len]
         audio_codes = self.vector_quantizer.decode(indices=audio_tokens_rearrange, input_len=audio_lens)
@@ -549,7 +551,6 @@ class DiscreteSpeechModel(ModelPT):
         max_context_len = max(context_lens)
         context_tokens = stack_tensors(tensors=context_token_list, max_lens=[max_context_len]).to(audio_tokens.device)
 
-        context_tokens = self.vector_quantizer_converter.convert_original_to_new(audio_tokens=context_tokens, audio_lens=context_lens)
         context_tokens_rearrange = rearrange(context_tokens, 'B C T -> C B T')
         # [batch_size, code_dim, audio_token_len]
         context_codes = self.vector_quantizer.decode(indices=context_tokens_rearrange, input_len=context_lens)
@@ -607,7 +608,6 @@ class DiscreteSpeechModel(ModelPT):
         audio_token_lens,
         sample_context=False,
     ):
-        audio_tokens = self.vector_quantizer_converter.convert_original_to_new(audio_tokens=audio_tokens, audio_lens=audio_token_lens)
         audio_tokens_rearrange = rearrange(audio_tokens, 'B C T -> C B T')
         # [batch_size, code_dim, audio_token_len]
         audio_codes = self.vector_quantizer.decode(indices=audio_tokens_rearrange, input_len=audio_token_lens).detach()
@@ -710,6 +710,11 @@ class DiscreteSpeechModel(ModelPT):
         semantic_codes = audio_codes_noise[:, :self.semantic_codebook_dim, :]
         acoustic_codes = audio_codes_noise[:, self.semantic_codebook_dim:, :]
 
+        if self.vector_quantizer_acoustic_converter is not None:
+            acoustic_token_sample = self.vector_quantizer_acoustic_converter.convert_original_to_new(
+                audio_tokens=acoustic_token_sample, audio_lens=audio_token_sample_lens
+            )
+
         semantic_tokens_pred, semantic_token_logits, semantic_tokens_pred_post, semantic_token_logits_post, \
         acoustic_tokens_pred, acoustic_token_logits, acoustic_tokens_pred_post, acoustic_token_logits_post, \
         dur_indices_pred, dur_logits, dur_indices_pred_post, dur_logits_post, \
@@ -790,7 +795,6 @@ class DiscreteSpeechModel(ModelPT):
         audio_temperature=None,
         audio_topk=None,
     ):
-        audio_tokens = self.vector_quantizer_converter.convert_original_to_new(audio_tokens=audio_tokens, audio_lens=audio_token_lens)
         audio_tokens_rearrange = rearrange(audio_tokens, 'B C T -> C B T').detach()
         # [batch_size, code_dim, audio_token_len]
         audio_codes = self.vector_quantizer.decode(indices=audio_tokens_rearrange, input_len=audio_token_lens)
@@ -867,7 +871,6 @@ class DiscreteSpeechModel(ModelPT):
         )
         # [B, C, T]
         audio_tokens = torch.concat([semantic_tokens, acoustic_tokens], dim=1)
-        audio_tokens = self.vector_quantizer_converter.convert_new_to_original(audio_tokens=audio_tokens, audio_lens=audio_lens)
 
         return audio_tokens, dur_lens, align_soft, balign_soft
 
@@ -1325,6 +1328,9 @@ class DiscreteSpeechModel(ModelPT):
 
         audio_tokens = rearrange(audio_tokens, 'B T C -> B C T')
 
+        if self.vector_quantizer_acoustic_converter is not None:
+            audio_tokens = self.vector_quantizer_acoustic_converter.convert_new_to_original(audio_tokens=audio_tokens, audio_lens=audio_lens)
+
         return audio_tokens
 
     def _duration_infer(
@@ -1622,6 +1628,5 @@ class DiscreteSpeechModel(ModelPT):
         )
         # [B, C, T]
         audio_tokens = torch.concat([semantic_tokens, acoustic_tokens], dim=1)
-        audio_tokens = self.vector_quantizer_converter.convert_new_to_original(audio_tokens=audio_tokens, audio_lens=audio_lens)
 
         return audio_tokens, audio_lens
