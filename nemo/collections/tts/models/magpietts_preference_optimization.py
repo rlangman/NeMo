@@ -877,24 +877,8 @@ class MagpieTTSModelOnlinePO(MagpieTTSModel):
         predicted_codes = predicted_codes[:, :, : predicted_codes_lens.max()]
 
         advantages = generated_codes_and_metrics['advantages']  # B
-        # Add extra tokens for BOS and EOS
-        bos_tensor = torch.full(
-            (predicted_codes.size(0), predicted_codes.size(1), 1),
-            self.audio_bos_id,
-            dtype=predicted_codes.dtype,
-            device=predicted_codes.device,
-        )
-        padding_tensor = torch.full(
-            (predicted_codes.size(0), predicted_codes.size(1), 1),
-            0,
-            dtype=predicted_codes.dtype,
-            device=predicted_codes.device,
-        )
-        predicted_codes = torch.cat([bos_tensor, predicted_codes, padding_tensor], dim=2)
-        for idx in range(predicted_codes.size(0)):
-            predicted_codes[idx, :, predicted_codes_lens[idx] + 1] = self.audio_eos_id  # Accounts for BOS
         batch_repeated['audio_codes'] = predicted_codes
-        batch_repeated['audio_codes_lens'] = predicted_codes_lens + 2  # Accounts for BOS and EOS
+        batch_repeated['audio_codes_lens'] = predicted_codes_lens
         if 'audio' in batch_repeated:
             del batch_repeated['audio']
         if 'audio_lens' in batch_repeated:
