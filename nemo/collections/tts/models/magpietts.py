@@ -3141,7 +3141,7 @@ class MagpieTTSModel(ModelPT):
                         )
                         if end_frame_index != float('inf'):
                             global_index = idx * self.frame_stacking_factor + end_frame_index
-                            end_indices[item_idx] = global_index - 1  # -1 to remove EOS token from output predictions
+                            end_indices[item_idx] = global_index
                             print(f"End detected for item {item_idx} at decoder timestep: {idx}")
 
                 all_predictions.append(audio_codes_next)
@@ -3161,6 +3161,7 @@ class MagpieTTSModel(ModelPT):
                 end_indices.get(idx, max_decoder_steps) for idx in range(text.size(0))
             ]  #  Ensure that the codec is atleast of length 4
             predicted_codes_lens = torch.tensor(predicted_lens, device=text.device).long()
+            predicted_codes = predicted_codes[:, :, :predicted_codes_lens.max()]
 
             predicted_audio, predicted_audio_lens, predicted_codes = self.codes_to_audio(
                 predicted_codes, predicted_codes_lens
