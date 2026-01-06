@@ -19,6 +19,7 @@ import os
 import random
 from dataclasses import dataclass
 from hydra.utils import instantiate
+import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -102,9 +103,16 @@ def create_text_to_speech_dataset(
         elif dataset_type == "tarred":
             if not is_train:
                 raise ValueError("Tarred dataset should only be used for training set.")
-            return TarredTextToSpeechDataset(
+
+            batch_duration = dataset_args.pop('batch_duration')
+            steps_per_epoch = dataset_args.sample_args.steps_per_epoch
+            dataset_args.sample_args.batch_size = 1
+            dataset_args.sample_args.steps_per_epoch = 1000 * dataset_args.sample_args.steps_per_epoch
+            dataset = TarredTextToSpeechDataset(
                 text_tokenizer=text_tokenizer, global_rank=global_rank, world_size=world_size, **dataset_args
             )
+            dataset = DurationBatchedTextToSpeechDataset(dataset, batch_duration=batch_duration, steps_per_epoch=steps_per_epoch)
+            return dataset
         else:
             raise ValueError(f"Unknown dataset type {dataset_type}")
 
@@ -316,6 +324,7 @@ class TextToSpeechDataset(Dataset):
             "audio_filepath": audio_filepath_rel,
             "tokens": tokens,
             "text_len": text_len,
+            "duration": data.manifest_entry["duration"],
         }
 
         if data.speaker is not None:
@@ -498,6 +507,7 @@ class TarredTextToSpeechDataset(IterableDataset):
             "audio_filepath": audio_filepath,
             "tokens": tokens,
             "text_len": text_len,
+            "duration": data.manifest_entry["duration"],
         }
 
         if self.include_speaker:
@@ -533,6 +543,54 @@ class TarredTextToSpeechDataset(IterableDataset):
 
     def __len__(self):
         return len(self.dataset)
+
+
+class DurationBatchedTextToSpeechDataset(IterableDataset):
+
+    def __init__(
+        self,
+        dataset,
+        steps_per_epoch,
+        batch_duration,
+        min_duration=4,
+        max_duration=20,
+        quadratic_duration=20,
+    ):
+        super().__init__()
+        self.dataset = dataset
+        self.min_duration = min_duration
+        self.max_duration = max_duration
+        self.steps_per_epoch = steps_per_epoch
+        self.batch_dict = {}
+        self.batch_size_dict = {}
+        for i in range(min_duration, max_duration + 1):
+            self.batch_dict[i] = []
+            effective_duration = i + (i ** 2) / quadratic_duration
+            batch_size = int(batch_duration / effective_duration)
+            self.batch_size_dict[i] = batch_size
+
+        print(f"Using batch sizes per duration: {self.batch_size_dict}")
+
+    def get_sampler(self, batch_size: int, world_size: int) -> Optional[torch.utils.data.Sampler]:
+        return None
+
+    def collate_fn(self, batch):
+        return self.dataset.collate_fn(batch[0])
+
+    def __iter__(self):
+        for example in self.dataset:
+            dur = example["duration"]
+            dur_key = math.ceil(dur)
+            dur_key = min(dur_key, self.max_duration)
+            dur_key = max(dur_key, self.min_duration)
+            batch = self.batch_dict[dur_key]
+            batch.append(example)
+            if len(batch) == self.batch_size_dict[dur_key]:
+                self.batch_dict[dur_key] = []
+                yield batch
+
+    def __len__(self):
+        return self.steps_per_epoch
 
 
 class MagpieTTSDataset(TextToSpeechDataset):
