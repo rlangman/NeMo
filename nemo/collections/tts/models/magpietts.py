@@ -883,16 +883,23 @@ class MagpieTTSModel(ModelPT):
                         new_state_dict[key[len(name_with_dot) :]] = state_dict[key]
                 child.load_state_dict(new_state_dict)
 
-    def add_special_tokens(self, codes, codes_len, bos_id, eos_id, num_bos_tokens=1, num_eos_tokens=1):
+    def add_eos_token(self, codes, codes_len, eos_id, num_eos_tokens=1):
         # codes: (B, C, T')
         # codes_len: (B,)
-        codes = torch.nn.functional.pad(input=codes, pad=(num_bos_tokens, 0), value=bos_id)
         codes = torch.nn.functional.pad(input=codes, pad=(0, num_eos_tokens), value=0)
-        codes_len = codes_len + num_bos_tokens + num_eos_tokens
+        codes_len = codes_len + num_eos_tokens
         # Insert EOS token at new final token entry
         for idx in range(codes.size(0)):
             codes[idx, :, codes_len[idx] - 1] = eos_id
 
+        return codes, codes_len
+
+    def add_special_tokens(self, codes, codes_len, bos_id, eos_id, num_bos_tokens=1, num_eos_tokens=1):
+        # codes: (B, C, T')
+        # codes_len: (B,)
+        codes = torch.nn.functional.pad(input=codes, pad=(num_bos_tokens, 0), value=bos_id)
+        codes_len = codes_len + num_bos_tokens
+        codes, codes_len = self.add_eos_token(codes=codes, codes_len=codes_len, eos_id=eos_id, num_eos_tokens=num_eos_tokens)
         return codes, codes_len
 
     def remove_bos_token(self, codes, codes_len, num_tokens=1):

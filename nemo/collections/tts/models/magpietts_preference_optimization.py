@@ -893,6 +893,8 @@ class MagpieTTSModelOnlinePO(MagpieTTSModel):
             with torch.no_grad():
                 reference_model_output = self._reference_model.process_batch(batch_repeated)
 
+        codebook_targets, _ = self.add_eos_token(codes=predicted_codes, codes_len=predicted_codes_lens, eos_id=self.audio_eos_id)
+
         total_loss = None
         total_kl = None
         for codebook_idx in range(self.num_audio_codebooks):
@@ -904,7 +906,7 @@ class MagpieTTSModelOnlinePO(MagpieTTSModel):
             ei = si + self.num_all_tokens_per_codebook
 
             codebook_logits = policy_model_outputs[logits_key][:, :, si:ei]  # B, T, C
-            codebook_labels = batch_repeated['audio_codes'][:, codebook_idx, 1:]
+            codebook_labels = codebook_targets[:, codebook_idx, :]
 
             per_token_codebook_log_probs = self._get_per_token_logps(
                 codebook_logits, codebook_labels, policy_codebook_loss_mask
