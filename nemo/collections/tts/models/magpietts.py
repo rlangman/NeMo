@@ -899,7 +899,9 @@ class MagpieTTSModel(ModelPT):
         # codes_len: (B,)
         codes = torch.nn.functional.pad(input=codes, pad=(num_bos_tokens, 0), value=bos_id)
         codes_len = codes_len + num_bos_tokens
-        codes, codes_len = self.add_eos_token(codes=codes, codes_len=codes_len, eos_id=eos_id, num_eos_tokens=num_eos_tokens)
+        codes, codes_len = self.add_eos_token(
+            codes=codes, codes_len=codes_len, eos_id=eos_id, num_eos_tokens=num_eos_tokens
+        )
         return codes, codes_len
 
     def remove_bos_token(self, codes, codes_len, num_tokens=1):
