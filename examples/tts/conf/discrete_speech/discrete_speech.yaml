@@ -37,10 +37,6 @@ semantic_codebook_dim: 6
 acoustic_codebook_num: 6
 acoustic_codebook_dim: 36
 
-acoustic_codebook_train_num: 9
-acoustic_codebook_train_size: 256
-acoustic_codebook_train_levels: [4, 4, 4, 4]
-
 context_min_len: 50
 context_max_len: 125
 
@@ -64,8 +60,8 @@ context_filters: 2048
 text_hidden_dim: 1024
 text_filters: 4096
 
-duration_hidden_dim: 512
-duration_filters: 2048
+duration_hidden_dim: 384
+duration_filters: 1536
 
 audio_hidden_dim: 512
 audio_filters: 2048
@@ -79,8 +75,10 @@ model:
   num_codebooks: ${codebook_num}
   semantic_codebook_num: ${semantic_codebook_num}
   semantic_codebook_dim: ${semantic_codebook_dim}
-  acoustic_codebook_num: ${acoustic_codebook_train_num}
+  acoustic_codebook_num: ${acoustic_codebook_num}
   acoustic_codebook_dim: ${acoustic_codebook_dim}
+
+  inference_phoneme_probability: 0.0
 
   vector_quantizer:
     _target_: nemo.collections.tts.modules.audio_codec_modules.GroupFiniteScalarQuantizer
@@ -93,11 +91,6 @@ model:
     num_levels_per_group: ${codebook_levels}
 
   vector_quantizer_acoustic:
-    _target_: nemo.collections.tts.modules.audio_codec_modules.GroupFiniteScalarQuantizer
-    num_groups: ${acoustic_codebook_train_num}
-    num_levels_per_group: ${acoustic_codebook_train_levels}
-
-  vector_quantizer_acoustic_codec:
     _target_: nemo.collections.tts.modules.audio_codec_modules.GroupFiniteScalarQuantizer
     num_groups: ${acoustic_codebook_num}
     num_levels_per_group: ${codebook_levels}
@@ -119,7 +112,7 @@ model:
       _target_: nemo.collections.tts.g2p.models.i18n_ipa.IpaG2p
       phoneme_dict: ${phoneme_dict_path}
       heteronyms: ${heteronyms_path}
-      phoneme_probability: 0.8
+      phoneme_probability: 0.1
       use_chars: true
       use_stresses: false
 
@@ -129,14 +122,17 @@ model:
       dataset_args:
         dataset_meta: ${train_ds_meta}
         feature_readers: ${feature_readers}
+        batch_duration: ${batch_size}
         pc_dropout_rate: 0.1
         min_words: 2
         min_duration: 1.0
         max_duration: 20.1
 
     dataloader_params:
-      batch_size: ${batch_size}
-      num_workers: 1
+      batch_size: 1
+      num_workers: 4
+      pin_memory: true
+      persistent_workers: true
 
   validation_ds:
     dataset:
@@ -151,6 +147,8 @@ model:
     dataloader_params:
       batch_size: 8
       num_workers: 1
+      pin_memory: true
+      persistent_workers: true
 
   log_config:
     log_dir: ${log_dir}
@@ -185,6 +183,8 @@ model:
     dataloader_params:
       batch_size: 8
       num_workers: 1
+      pin_memory: true
+      persistent_workers: true
 
   aligner:
     _target_: nemo.collections.tts.modules.discrete_speech_modules.Aligner
@@ -208,7 +208,7 @@ model:
     rnn_dim: 512
     encoder:
       _target_: nemo.collections.tts.modules.discrete_speech_transformer.ContextTransformer
-      n_layer: 8
+      n_layer: 6
       n_head: 8
       d_model: ${context_hidden_dim}
       d_head: 64
@@ -288,8 +288,8 @@ model:
 
   acoustic_decoder:
     _target_: nemo.collections.tts.modules.discrete_speech_modules.AudioDecoder
-    num_codebooks: ${acoustic_codebook_train_num}
-    codebook_size: ${acoustic_codebook_train_size}
+    num_codebooks: ${acoustic_codebook_num}
+    codebook_size: ${codebook_size}
     codebook_dim: ${acoustic_codebook_dim}
     pre_net:
       _target_: nemo.collections.tts.modules.discrete_speech_modules.PreNet
@@ -371,6 +371,7 @@ trainer:
   log_every_n_steps: 500
   check_val_every_n_epoch: 1
   benchmark: false
+  use_distributed_sampler: false
 
 exp_manager:
   exp_dir: null
