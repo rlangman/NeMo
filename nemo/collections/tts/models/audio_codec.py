@@ -111,7 +111,10 @@ class AudioCodecModel(ModelPT):
         self.audio_decoder = instantiate(cfg.audio_decoder)
 
         # Discriminator setup
-        self.discriminator = instantiate(cfg.discriminator)
+        if cfg.get("discriminator"):
+            self.discriminator = instantiate(cfg.discriminator)
+        else:
+            self.discriminator = None
 
         if cfg.get("semantic_codec"):
             semantic_codec_cfg = cfg.get("semantic_codec")
@@ -586,7 +589,7 @@ class AudioCodecModel(ModelPT):
             "lr": optim_gen.param_groups[0]['lr'],
         }
 
-        if self.should_update_disc(batch_idx):
+        if self.discriminator is not None and self.should_update_disc(batch_idx):
             # Train discriminator
             disc_scores_real, disc_scores_gen, _, _ = self.discriminator(
                 audio_real=audio, audio_gen=audio_gen.detach()
@@ -625,21 +628,22 @@ class AudioCodecModel(ModelPT):
             metrics["g_loss_si_sdr"] = loss_si_sdr
             generator_losses.append(self.si_sdr_loss_scale * loss_si_sdr)
 
-        _, disc_scores_gen, fmaps_real, fmaps_gen = self.discriminator(audio_real=audio, audio_gen=audio_gen)
+        if self.discriminator is not None:
+            _, disc_scores_gen, fmaps_real, fmaps_gen = self.discriminator(audio_real=audio, audio_gen=audio_gen)
 
-        if self.gen_loss_scale:
-            loss_gen = self.gen_loss_fn(disc_scores_gen=disc_scores_gen)
-            metrics["g_loss_gen"] = loss_gen
-            generator_losses.append(self.gen_loss_scale * loss_gen)
+            if self.gen_loss_scale:
+                loss_gen = self.gen_loss_fn(disc_scores_gen=disc_scores_gen)
+                metrics["g_loss_gen"] = loss_gen
+                generator_losses.append(self.gen_loss_scale * loss_gen)
 
-        if self.feature_loss_scale:
-            loss_feature = self.feature_loss_fn(fmaps_real=fmaps_real, fmaps_gen=fmaps_gen)
-            metrics["g_loss_feature"] = loss_feature
-            generator_losses.append(self.feature_loss_scale * loss_feature)
+            if self.feature_loss_scale:
+                loss_feature = self.feature_loss_fn(fmaps_real=fmaps_real, fmaps_gen=fmaps_gen)
+                metrics["g_loss_feature"] = loss_feature
+                generator_losses.append(self.feature_loss_scale * loss_feature)
 
-        if self.commit_loss_scale:
-            metrics["g_loss_commit"] = commit_loss
-            generator_losses.append(self.commit_loss_scale * commit_loss)
+            if self.commit_loss_scale:
+                metrics["g_loss_commit"] = commit_loss
+                generator_losses.append(self.commit_loss_scale * commit_loss)
 
         if self.mmd_loss_scale:
             loss_mmd = self.mmd_loss_fn(inputs=codes)
@@ -834,7 +838,11 @@ class AudioCodecModel(ModelPT):
         )
         optim_g = instantiate(optim_config, params=gen_params)
 
-        disc_params = self.discriminator.parameters()
+        if self.discriminator is not None:
+            disc_params = self.discriminator.parameters()
+        else:
+            disc_params = self.audio_encoder.parameters()
+
         optim_d = instantiate(optim_config, params=disc_params)
 
         if sched_config is None:
@@ -849,7 +857,6 @@ class AudioCodecModel(ModelPT):
         scheduler_g = prepare_lr_scheduler(
             optimizer=optim_g, scheduler_config=sched_config, train_dataloader=self._train_dl
         )
-
         scheduler_d = prepare_lr_scheduler(
             optimizer=optim_d, scheduler_config=sched_config, train_dataloader=self._train_dl
         )
