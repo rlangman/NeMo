@@ -138,7 +138,7 @@ class DiscreteSpeechModel(ModelPT):
         self.audio_noise_dist = torch.distributions.beta.Beta(concentration1=1.0, concentration0=audio_noise_beta)
 
         # Rate at which noise is added to ground truth alignment seen by the decoder
-        self.decoder_duration_noise_percent = cfg.get("decoder_duration_noise_percent", 0.3)
+        self.decoder_duration_noise_percent = cfg.get("decoder_duration_noise_percent", 0.2)
 
         # Reconstruction losses
         self.audio_token_loss_scale = cfg.get("audio_token_loss_scale", 1.0)
@@ -1533,6 +1533,7 @@ class DiscreteSpeechModel(ModelPT):
             "silence_pad_start": NeuralType((), IntType(), optional=True),
             "silence_pad_end": NeuralType((), IntType(), optional=True),
             "min_speaking_rate": NeuralType((), IntType(), optional=True),
+            "max_speaking_rate": NeuralType((), IntType(), optional=True),
         },
         output_types={
             "audio_tokens_pred": NeuralType(('B', 'C', 'T_token'), TokenIndex()),
@@ -1554,7 +1555,7 @@ class DiscreteSpeechModel(ModelPT):
         duration_topk=None,
         duration_temperature=None,
         speaking_rate=None,
-        silence_pad_start=2,
+        silence_pad_start=1,
         silence_pad_end=1,
         min_speaking_rate=-0.5,
         max_speaking_rate=0.5,
@@ -1624,7 +1625,7 @@ class DiscreteSpeechModel(ModelPT):
             num_iters=num_audio_iters,
             num_denoise_iters=num_audio_denoise_iters,
             temperature=audio_temperature,
-            topk=audio_topk,
+            topk=1,
         )
         # [B, C, T]
         audio_tokens = torch.concat([semantic_tokens, acoustic_tokens], dim=1)

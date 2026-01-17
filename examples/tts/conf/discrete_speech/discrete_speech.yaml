@@ -78,7 +78,7 @@ model:
   acoustic_codebook_num: ${acoustic_codebook_num}
   acoustic_codebook_dim: ${acoustic_codebook_dim}
 
-  inference_phoneme_probability: 0.0
+  inference_phoneme_probability: 1.0
 
   vector_quantizer:
     _target_: nemo.collections.tts.modules.audio_codec_modules.GroupFiniteScalarQuantizer
@@ -112,7 +112,7 @@ model:
       _target_: nemo.collections.tts.g2p.models.i18n_ipa.IpaG2p
       phoneme_dict: ${phoneme_dict_path}
       heteronyms: ${heteronyms_path}
-      phoneme_probability: 0.1
+      phoneme_probability: 0.8
       use_chars: true
       use_stresses: false
 

@@ -31,7 +31,6 @@ class LinearFF(nn.Module):
 
         self.d_model = d_model
         self.d_inner = d_inner
-        self.dropout = dropout
 
         self.input_layer = nn.Linear(d_model, d_inner)
         self.activation = nn.ELU()
