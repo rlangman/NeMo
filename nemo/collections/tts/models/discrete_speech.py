@@ -138,7 +138,7 @@ class DiscreteSpeechModel(ModelPT):
         self.audio_noise_dist = torch.distributions.beta.Beta(concentration1=1.0, concentration0=audio_noise_beta)
 
         # Rate at which noise is added to ground truth alignment seen by the decoder
-        self.decoder_duration_noise_percent = cfg.get("decoder_duration_noise_percent", 0.3)
+        self.decoder_duration_noise_percent = cfg.get("decoder_duration_noise_percent", 0.2)
 
         # Reconstruction losses
         self.audio_token_loss_scale = cfg.get("audio_token_loss_scale", 1.0)

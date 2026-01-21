@@ -23,7 +23,6 @@ from hydra.utils import instantiate
 from lightning.pytorch import Trainer
 from omegaconf import DictConfig, OmegaConf, open_dict
 
-from nemo.collections.common.parts.utils import mask_sequence_tensor
 from nemo.collections.tts.losses.audio_codec_loss import (
     FeatureMatchingLoss,
     MultiResolutionMelLoss,
@@ -110,6 +109,21 @@ class AudioCodecModel(ModelPT):
         # Decoder setup
         self.audio_decoder = instantiate(cfg.audio_decoder)
 
+        slm_encoder = cfg.get("slm_encoder")
+        if slm_encoder:
+            self.slm_encoder = instantiate(cfg.slm_encoder)
+            self.slm_encoder.eval()
+            self.slm_encoder.freeze()
+            self.slm_decoder = instantiate(cfg.slm_decoder)
+            self.slm_loss_fn = torch.nn.MSELoss()
+            self.slm_loss_scale = cfg.get("slm_loss_scale", 1.0)
+
+        else:
+            self.slm_encoder = None
+            self.slm_decoder = None
+            self.slm_loss_fn = None
+            self.slm_loss_scale = None
+
         # Discriminator setup
         if cfg.get("discriminator"):
             self.discriminator = instantiate(cfg.discriminator)
@@ -127,10 +141,15 @@ class AudioCodecModel(ModelPT):
 
         if semantic_codec is not None:
             self.register_nemo_submodule(name="semantic_codec", config_field="semantic_codec", model=semantic_codec)
-            self.semantic_codec.freeze()
+            del self.semantic_codec.slm_encoder
             self.semantic_codec.eval()
+            self.semantic_codec.freeze()
+            self.acoustic_dropout_rate = cfg.get("acoustic_dropout_rate", 0.0)
+            self.codebook_dropout_rate = cfg.get("codebook_dropout_rate", 0.0)
         else:
             self.semantic_codec = None
+            self.acoustic_dropout_rate = 0.0
+            self.codebook_dropout_rate = 0.0
 
         # Mel loss setup
         loss_resolutions = cfg.loss_resolutions
@@ -258,6 +277,8 @@ class AudioCodecModel(ModelPT):
                 del state_dict[key]
             if "discriminator" in key and ".slm_model.ssl_model." in key:
                 del state_dict[key]
+            if key.startswith("slm_encoder."):
+                del state_dict[key]
         return state_dict
 
     def load_state_dict(self, state_dict, strict=True):
@@ -266,6 +287,8 @@ class AudioCodecModel(ModelPT):
             if self.use_scl_loss and "speaker_encoder." in key:
                 del state_dict[key]
             if "discriminator" in key and ".slm_model.ssl_model." in key:
+                del state_dict[key]
+            if key.startswith("slm_encoder."):
                 del state_dict[key]
 
         super().load_state_dict(state_dict, strict=False)
@@ -531,6 +554,13 @@ class AudioCodecModel(ModelPT):
         audio, audio_len = self.pad_audio(audio=audio, audio_len=audio_len, samples_per_frame=self.samples_per_frame)
         return audio, audio_len
 
+    def _codebook_dropout(self, encoded):
+        batch_size = encoded.shape[0]
+        acoustic_mask = torch.rand(size=[batch_size, 1, 1], device=encoded.device) >= self.acoustic_dropout_rate
+        codebook_mask = torch.rand(size=encoded.shape, device=encoded.device) >= self.codebook_dropout_rate
+        out = encoded * acoustic_mask * codebook_mask
+        return out
+
     def _process_batch(self, batch):
         # [B, T_audio]
         audio = batch.get("audio")
@@ -559,10 +589,23 @@ class AudioCodecModel(ModelPT):
         else:
             commit_loss = 0.0
 
+        if self.training and self.codebook_dropout_rate:
+            semantic_input = encoded[:, :self.semantic_codec.vector_quantizer.codebook_dim, :]
+            acoustic_input = encoded[:, self.semantic_codec.vector_quantizer.codebook_dim:, :]
+            acoustic_input = self._codebook_dropout(acoustic_input)
+            encoded = torch.concat([semantic_input, acoustic_input], dim=1)
+
         # [B, T]
         audio_gen, _ = self.audio_decoder(inputs=encoded, input_len=encoded_len)
 
-        return audio, audio_len, audio_gen, commit_loss, encoded
+        if self.training and self.slm_encoder is not None:
+            ssl_emb = self.slm_encoder(audio=audio)
+            ssl_emb_pred = self.slm_decoder(inputs=encoded)
+        else:
+            ssl_emb = None
+            ssl_emb_pred = None
+
+        return audio, audio_len, audio_gen, commit_loss, encoded, ssl_emb, ssl_emb_pred
 
     @property
     def disc_update_prob(self) -> float:
@@ -582,7 +625,7 @@ class AudioCodecModel(ModelPT):
     def training_step(self, batch, batch_idx):
         optim_gen, optim_disc = self.optimizers()
 
-        audio, audio_len, audio_gen, commit_loss, codes = self._process_batch(batch)
+        audio, audio_len, audio_gen, commit_loss, codes, ssl_emb, ssl_emb_pred = self._process_batch(batch)
 
         metrics = {
             "global_step": self.global_step,
@@ -687,6 +730,11 @@ class AudioCodecModel(ModelPT):
             metrics["g_loss_acl"] = loss_acl
             generator_losses.append(metrics["g_loss_acl"])
 
+        if self.slm_loss_scale:
+            loss_slm = self.slm_loss_fn(input=ssl_emb_pred, target=ssl_emb)
+            metrics["g_loss_slm"] = loss_slm
+            generator_losses.append(self.slm_loss_scale * loss_slm)
+
         loss_gen_all = sum(generator_losses)
 
         optim_gen.zero_grad()
@@ -702,7 +750,7 @@ class AudioCodecModel(ModelPT):
         self.update_lr("epoch")
 
     def validation_step(self, batch, batch_idx):
-        audio, audio_len, audio_gen, _, _ = self._process_batch(batch)
+        audio, audio_len, audio_gen, _, _, _, _ = self._process_batch(batch)
 
         loss_mel_l1, loss_mel_l2 = self.mel_loss_fn(
             audio_real=audio.float(), audio_gen=audio_gen.float(), audio_len=audio_len
@@ -833,8 +881,9 @@ class AudioCodecModel(ModelPT):
         asr_ph_params = self.phoneme_asr_model.parameters() if self.use_asr_consitency_loss else []
         se_params = self.speaker_encoder.parameters() if self.use_scl_loss else []
         vq_params = self.vector_quantizer.parameters() if self.vector_quantizer else []
+        slm_params = self.slm_decoder.parameters() if self.slm_decoder else []
         gen_params = itertools.chain(
-            self.audio_encoder.parameters(), self.audio_decoder.parameters(), vq_params, asr_ph_params, se_params
+            self.audio_encoder.parameters(), self.audio_decoder.parameters(), vq_params, asr_ph_params, se_params, slm_params
         )
         optim_g = instantiate(optim_config, params=gen_params)
 

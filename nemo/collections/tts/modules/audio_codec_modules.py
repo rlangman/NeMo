@@ -23,7 +23,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
-from transformers import AutoModel
+from transformers import AutoFeatureExtractor, AutoModel, Wav2Vec2BertModel
 
 from nemo.collections.asr.modules import AudioToMelSpectrogramPreprocessor
 from nemo.collections.common.parts.utils import ClampActivation, HalfSnake, Snake, mask_sequence_tensor
@@ -183,6 +183,132 @@ class SLMDiscriminator(NeuralModule):
         y_d_g, fmap_g = self._forward(audio_gen)
 
         return [y_d_r.unsqueeze(1)], [y_d_g.unsqueeze(1)], [fmap_r], [fmap_g]
+
+
+class SLMEncoder(NeuralModule):
+    """SLM Encoder
+
+    Args:
+        slm_model_name: Hugging Face Speech Language Models name.
+        slm_sr: Speech Language Models input sampling rate.
+        input_sr: Audio input sampling rate.
+        padding: Audio padding to add before encoding
+
+    """
+
+    def __init__(
+        self,
+        slm_model_name="facebook/w2v-bert-2.0",
+        slm_sr=16000,
+        input_sr=22050,
+        hidden_layer=16,
+        padding=80,
+        scaling_factor=5.0
+    ):
+        super().__init__()
+
+        self.slm_sr = slm_sr
+        if input_sr == self.slm_sr:
+            self.resample = None
+        elif HAVE_TORCHAUDIO:
+            self.resample = torchaudio.transforms.Resample(input_sr, self.slm_sr)
+        else:
+            raise ModuleNotFoundError("torchaudio must be installed for resampling.")
+
+        self.feature_extractor = AutoFeatureExtractor.from_pretrained(slm_model_name)
+        self.semantic_model = Wav2Vec2BertModel.from_pretrained(slm_model_name, output_hidden_states=True)
+        self.semantic_model.eval()
+
+        self.hidden_layer = hidden_layer
+        self.padding = padding
+        self.scaling_factor = scaling_factor
+
+    @property
+    def input_types(self):
+        return {
+            "audio": NeuralType(('B', 'T'), AudioSignal()),
+        }
+
+    @property
+    def output_types(self):
+        return {
+            "slm_embeddings": [NeuralType(('B', 'D', 'T'), VoidType())],
+        }
+
+    @typecheck()
+    def forward(self, audio):
+        if self.resample is not None:
+            audio = self.resample(audio)
+
+        audio = torch.nn.functional.pad(audio, (0, self.padding))
+        feats = self.feature_extractor(audio.cpu(), sampling_rate=self.slm_sr, return_tensors="pt").data['input_features']
+        feats = feats.to(audio.device)
+
+        with torch.no_grad():
+            out = self.semantic_model(feats)
+            slm_emb = out.hidden_states[self.hidden_layer] / self.scaling_factor
+
+        slm_emb = rearrange(slm_emb, 'B T D -> B D T')
+
+        return slm_emb
+
+
+class SLMDecoder(NeuralModule):
+    def __init__(
+        self,
+        in_channels: int,
+        hidden_dim: int,
+        out_channels: int,
+        up_sample_rate: int,
+        kernel_size: int = 3
+    ):
+        super().__init__()
+        padding = get_padding(kernel_size=3)
+        self.input_layer = nn.Conv1d(
+            in_channels=in_channels,
+            out_channels=hidden_dim,
+            kernel_size=kernel_size,
+            padding=padding,
+            padding_mode="zeros",
+        )
+        self.output_layer = nn.Conv1d(
+            in_channels=hidden_dim,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            padding=padding,
+            padding_mode="zeros",
+        )
+
+        up_kernel_size = 2 * up_sample_rate
+        up_padding, output_padding = get_up_sample_padding(up_kernel_size, up_sample_rate)
+        self.upsample_layer = nn.ConvTranspose1d(
+            in_channels=hidden_dim,
+            out_channels=hidden_dim,
+            kernel_size=up_kernel_size,
+            stride=up_sample_rate,
+            padding=up_padding,
+            output_padding=output_padding,
+            padding_mode="zeros",
+        )
+
+    @property
+    def input_types(self):
+        return {
+            "inputs": NeuralType(('B', 'D', 'T'), VoidType()),
+        }
+
+    @property
+    def output_types(self):
+        return {
+            "output": NeuralType(('B', 'C', 'T'), VoidType()),
+        }
+
+    @typecheck()
+    def forward(self, inputs):
+        out = self.input_layer(inputs)
+        out = self.upsample_layer(out)
+        out = self.output_layer(out)
+        return out
 
 
 # Torch version of transformers.models.wav2vec2.feature_extraction_wav2vec2.Wav2Vec2FeatureExtractor.zero_mean_unit_var_norm
