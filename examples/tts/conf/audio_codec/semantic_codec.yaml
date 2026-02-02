@@ -49,9 +49,11 @@ model:
   commit_loss_scale: 0.0
   mmd_loss_scale: 0.1
   mmd_time_loss_scale: 1.0
-  slm_loss_scale: 1.0
 
-  mmd_loss_start_epoch: 2
+  mmd_loss_start_epoch: 1
+
+  use_slm_loss: true
+  use_asr_loss: true
 
   # All resolutions for mel reconstruction loss, ordered [num_fft, hop_length, window_length]
   loss_resolutions: [[ 1280, 320, 1280 ]]
@@ -158,6 +160,17 @@ model:
     hidden_dim: 1024
     out_channels: 1024
     up_sample_rate: 2
+
+  asr_encoder:
+    _target_: nemo.collections.tts.modules.audio_codec_modules.ASREncoder
+    input_sr: ${output_sample_rate}
+
+  asr_decoder:
+    _target_: nemo.collections.tts.modules.audio_codec_modules.ASRDecoder
+    in_channels: ${encoder_out_dim}
+    hidden_dim: 1024
+    out_channels: 1024
+    down_sample_rate: 2
 
   generator_loss:
     _target_: nemo.collections.tts.losses.audio_codec_loss.GeneratorSquaredLoss

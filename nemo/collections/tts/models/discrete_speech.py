@@ -59,6 +59,7 @@ class DiscreteSpeechModel(ModelPT):
         cfg = model_utils.maybe_update_config_version(cfg)
 
         self.text_tokenizer = self._create_tokenizer(cfg.text_tokenizer)
+        self.has_boundaries = self.text_tokenizer.add_boundaries
         self.inference_phoneme_probability = cfg.get("inference_phoneme_probability", 1.0)
 
         super().__init__(cfg=cfg, trainer=trainer)
@@ -295,8 +296,13 @@ class DiscreteSpeechModel(ModelPT):
             max_audio_len * torch.ones_like(cum_ends)
         )
         # [B, 1]
-        min_space = space_ends_invert.topk(k=2, dim=1, largest=False).values[:, 1:2]
-        max_space = space_ends.topk(k=2, dim=1).values[:, 1:2]
+        if self.has_boundaries:
+            min_space = space_ends_invert.topk(k=1, dim=1, largest=False).values[:, :1]
+            max_space = space_ends.topk(k=1, dim=1).values[:, :1]
+        else:
+            min_space = space_ends_invert.topk(k=2, dim=1, largest=False).values[:, 1:2]
+            max_space = space_ends.topk(k=2, dim=1).values[:, 1:2]
+
         return space_ends, min_space, max_space
 
     def _slice_context_information(

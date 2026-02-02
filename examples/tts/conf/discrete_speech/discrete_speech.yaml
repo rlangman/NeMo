@@ -99,8 +99,9 @@ model:
     _target_: nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers.IPATokenizer
     punct: true
     apostrophe: true
-    pad_with_space: true
+    pad_with_space: false
     skip_oov: false
+    add_boundaries: true
     non_default_punct_list: [
       ',', '.', '!', '?', '-',
       ':', ';', '/', '"', '(',

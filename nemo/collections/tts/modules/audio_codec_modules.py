@@ -25,6 +25,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from transformers import AutoFeatureExtractor, AutoModel, Wav2Vec2BertModel
 
+from nemo.collections.asr.models import EncDecRNNTBPEModel
 from nemo.collections.asr.modules import AudioToMelSpectrogramPreprocessor
 from nemo.collections.common.parts.utils import ClampActivation, HalfSnake, Snake, mask_sequence_tensor
 from nemo.core.classes.common import typecheck
@@ -260,23 +261,24 @@ class SLMDecoder(NeuralModule):
         hidden_dim: int,
         out_channels: int,
         up_sample_rate: int,
-        kernel_size: int = 3
+        kernel_size: int = 3,
+        padding_mode: str = "replicate",
     ):
         super().__init__()
-        padding = get_padding(kernel_size=3)
+        padding = get_padding(kernel_size=kernel_size)
         self.input_layer = nn.Conv1d(
             in_channels=in_channels,
             out_channels=hidden_dim,
             kernel_size=kernel_size,
             padding=padding,
-            padding_mode="zeros",
+            padding_mode=padding_mode,
         )
         self.output_layer = nn.Conv1d(
             in_channels=hidden_dim,
             out_channels=out_channels,
             kernel_size=kernel_size,
             padding=padding,
-            padding_mode="zeros",
+            padding_mode=padding_mode,
         )
 
         up_kernel_size = 2 * up_sample_rate
@@ -288,7 +290,6 @@ class SLMDecoder(NeuralModule):
             stride=up_sample_rate,
             padding=up_padding,
             output_padding=output_padding,
-            padding_mode="zeros",
         )
 
     @property
@@ -307,6 +308,117 @@ class SLMDecoder(NeuralModule):
     def forward(self, inputs):
         out = self.input_layer(inputs)
         out = self.upsample_layer(out)
+        out = self.output_layer(out)
+        return out
+
+
+class ASREncoder(NeuralModule):
+    """AST Encoder
+
+    Args:
+    """
+
+    def __init__(
+        self,
+        asr_model_name="nvidia/parakeet-tdt-1.1b",
+        asr_sr=16000,
+        input_sr=22050,
+    ):
+        super().__init__()
+
+        self.asr_sr = asr_sr
+        if input_sr == self.asr_sr:
+            self.resample = None
+        elif HAVE_TORCHAUDIO:
+            self.resample = torchaudio.transforms.Resample(input_sr, self.asr_sr)
+        else:
+            raise ModuleNotFoundError("torchaudio must be installed for resampling.")
+
+        self.asr_model = EncDecRNNTBPEModel.from_pretrained(model_name=asr_model_name)
+        self.asr_model.eval()
+        self.asr_model.freeze()
+
+    @property
+    def input_types(self):
+        return {
+            "audio": NeuralType(('B', 'T'), AudioSignal()),
+        }
+
+    @property
+    def output_types(self):
+        return {
+            "encoded": [NeuralType(('B', 'D', 'T'), VoidType())],
+        }
+
+    @typecheck()
+    def forward(self, audio):
+        if self.resample is not None:
+            audio = self.resample(audio)
+
+        audio_len = audio.shape[1] * torch.ones(audio.shape[0], dtype=torch.int64, device=audio.device)
+        #audio = torch.nn.functional.pad(audio, (0, self.padding))
+        with torch.no_grad():
+            encoded, _ = self.asr_model(input_signal=audio, input_signal_length=audio_len)
+
+        encoded = encoded[:, :, :-1]
+
+        return encoded
+
+
+class ASRDecoder(NeuralModule):
+    def __init__(
+        self,
+        in_channels: int,
+        hidden_dim: int,
+        out_channels: int,
+        down_sample_rate: int,
+        kernel_size: int = 3,
+        padding_mode: str = "replicate"
+    ):
+        super().__init__()
+        padding = get_padding(kernel_size=kernel_size)
+        self.input_layer = nn.Conv1d(
+            in_channels=in_channels,
+            out_channels=hidden_dim,
+            kernel_size=kernel_size,
+            padding=padding,
+            padding_mode=padding_mode,
+        )
+        self.output_layer = nn.Conv1d(
+            in_channels=hidden_dim,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            padding=padding,
+            padding_mode=padding_mode,
+        )
+
+        down_kernel_size = 2 * down_sample_rate
+        down_padding = get_down_sample_padding(kernel_size, stride=down_sample_rate)
+        self.downsample_layer = nn.Conv1d(
+            in_channels=hidden_dim,
+            out_channels=hidden_dim,
+            kernel_size=down_kernel_size,
+            stride=down_sample_rate,
+            padding=down_padding,
+            padding_mode=padding_mode,
+        )
+
+    @property
+    def input_types(self):
+        return {
+            "inputs": NeuralType(('B', 'D', 'T'), VoidType()),
+        }
+
+    @property
+    def output_types(self):
+        return {
+            "output": NeuralType(('B', 'C', 'T'), VoidType()),
+        }
+
+    @typecheck()
+    def forward(self, inputs):
+        out = self.input_layer(inputs)
+        out = self.downsample_layer(out)
         out = self.output_layer(out)
         return out
 
