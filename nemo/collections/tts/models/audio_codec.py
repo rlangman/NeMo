@@ -109,14 +109,29 @@ class AudioCodecModel(ModelPT):
         # Decoder setup
         self.audio_decoder = instantiate(cfg.audio_decoder)
 
-        slm_encoder = cfg.get("slm_encoder")
-        if slm_encoder:
-            self.slm_encoder = instantiate(cfg.slm_encoder)
+        self.use_slm_loss = cfg.get("use_slm_loss", False)
+        if self.use_slm_loss:
+            self.slm_encoder = instantiate(cfg.get("slm_encoder"))
             self.slm_encoder.eval()
             self.slm_encoder.freeze()
             self.slm_decoder = instantiate(cfg.slm_decoder)
             self.slm_loss_fn = torch.nn.MSELoss()
             self.slm_loss_scale = cfg.get("slm_loss_scale", 1.0)
+
+        else:
+            self.slm_encoder = None
+            self.slm_decoder = None
+            self.slm_loss_fn = None
+            self.slm_loss_scale = None
+
+        self.use_asr_loss = cfg.get("use_asr_loss", False)
+        if self.use_asr_loss:
+            self.asr_encoder = instantiate(cfg.get("asr_encoder"))
+            self.asr_encoder.eval()
+            self.asr_encoder.freeze()
+            self.asr_decoder = instantiate(cfg.asr_decoder)
+            self.asr_loss_fn = torch.nn.MSELoss()
+            self.asr_loss_scale = cfg.get("asr_loss_scale", 0.5)
 
         else:
             self.slm_encoder = None
@@ -141,7 +156,12 @@ class AudioCodecModel(ModelPT):
 
         if semantic_codec is not None:
             self.register_nemo_submodule(name="semantic_codec", config_field="semantic_codec", model=semantic_codec)
-            del self.semantic_codec.slm_encoder
+            if semantic_codec.use_slm_loss:
+                del self.semantic_codec.slm_encoder
+
+            if semantic_codec.use_asr_loss:
+                del self.semantic_codec.asr_encoder
+
             self.semantic_codec.eval()
             self.semantic_codec.freeze()
             self.acoustic_dropout_rate = cfg.get("acoustic_dropout_rate", 0.0)
@@ -230,16 +250,6 @@ class AudioCodecModel(ModelPT):
             self.speaker_encoder.freeze()
             print("Speaker encoder loaded and frozen !!")
 
-        # Disabled for now as it is not used in final model
-        self.use_asr_consitency_loss = False
-        self.acl_loss_scale = False
-        # self.use_asr_consitency_loss = cfg.get("use_asr_consitency_loss", False)
-        # self.acl_loss_scale = cfg.get("acl_loss_scale", False)
-        # if self.use_asr_consitency_loss:
-        #     self.phoneme_asr_model = PhonemeASR(input_sr=self.sample_rate)
-        #     self.phoneme_asr_model.freeze()
-        #     # self.acl_loss = CrossEntropyLoss()
-        #     print("Phoneme ASR model loaded and frozen !!")
         self.disc_start_epoch = cfg.get("disc_start_epoch", 0)
 
         # Log setup
@@ -279,6 +289,8 @@ class AudioCodecModel(ModelPT):
                 del state_dict[key]
             if key.startswith("slm_encoder."):
                 del state_dict[key]
+            if key.startswith("asr_encoder."):
+                del state_dict[key]
         return state_dict
 
     def load_state_dict(self, state_dict, strict=True):
@@ -289,6 +301,8 @@ class AudioCodecModel(ModelPT):
             if "discriminator" in key and ".slm_model.ssl_model." in key:
                 del state_dict[key]
             if key.startswith("slm_encoder."):
+                del state_dict[key]
+            if key.startswith("asr_encoder."):
                 del state_dict[key]
 
         super().load_state_dict(state_dict, strict=False)
@@ -598,14 +612,21 @@ class AudioCodecModel(ModelPT):
         # [B, T]
         audio_gen, _ = self.audio_decoder(inputs=encoded, input_len=encoded_len)
 
-        if self.training and self.slm_encoder is not None:
+        if self.training and self.use_slm_loss:
             ssl_emb = self.slm_encoder(audio=audio)
             ssl_emb_pred = self.slm_decoder(inputs=encoded)
         else:
             ssl_emb = None
             ssl_emb_pred = None
 
-        return audio, audio_len, audio_gen, commit_loss, encoded, ssl_emb, ssl_emb_pred
+        if self.training and self.use_asr_loss:
+            asr_emb = self.asr_encoder(audio=audio)
+            asr_emb_pred = self.asr_decoder(inputs=encoded)
+        else:
+            asr_emb = None
+            asr_emb_pred = None
+
+        return audio, audio_len, audio_gen, commit_loss, encoded, ssl_emb, ssl_emb_pred, asr_emb, asr_emb_pred
 
     @property
     def disc_update_prob(self) -> float:
@@ -625,7 +646,7 @@ class AudioCodecModel(ModelPT):
     def training_step(self, batch, batch_idx):
         optim_gen, optim_disc = self.optimizers()
 
-        audio, audio_len, audio_gen, commit_loss, codes, ssl_emb, ssl_emb_pred = self._process_batch(batch)
+        audio, audio_len, audio_gen, commit_loss, codes, ssl_emb, ssl_emb_pred, asr_emb, asr_emb_pred = self._process_batch(batch)
 
         metrics = {
             "global_step": self.global_step,
@@ -717,23 +738,15 @@ class AudioCodecModel(ModelPT):
             metrics["g_loss_scl"] = loss_scl
             generator_losses.append(metrics["g_loss_scl"])
 
-        if self.use_asr_consitency_loss:
-            # concate generated and GT waveforms
-            audios_batch = torch.cat((audio.squeeze(1), audio_gen.squeeze(1)), dim=0)
-
-            logits, _ = self.phoneme_asr_model(audios_batch)
-
-            logits_gt, logits_pred = torch.chunk(logits, 2, dim=0)
-            # labels_gt, labels_pred = torch.chunk(labels, 2, dim=0)
-
-            loss_acl = torch.nn.functional.mse_loss(logits_pred, logits_gt) * self.acl_loss_scale
-            metrics["g_loss_acl"] = loss_acl
-            generator_losses.append(metrics["g_loss_acl"])
-
-        if self.slm_loss_scale:
+        if self.use_slm_loss:
             loss_slm = self.slm_loss_fn(input=ssl_emb_pred, target=ssl_emb)
             metrics["g_loss_slm"] = loss_slm
             generator_losses.append(self.slm_loss_scale * loss_slm)
+
+        if self.use_asr_loss:
+            loss_asr = self.asr_loss_fn(input=asr_emb_pred, target=asr_emb)
+            metrics["g_loss_asr"] = loss_asr
+            generator_losses.append(self.asr_loss_scale * loss_asr)
 
         loss_gen_all = sum(generator_losses)
 
@@ -750,7 +763,7 @@ class AudioCodecModel(ModelPT):
         self.update_lr("epoch")
 
     def validation_step(self, batch, batch_idx):
-        audio, audio_len, audio_gen, _, _, _, _ = self._process_batch(batch)
+        audio, audio_len, audio_gen, _, _, _, _, _, _ = self._process_batch(batch)
 
         loss_mel_l1, loss_mel_l2 = self.mel_loss_fn(
             audio_real=audio.float(), audio_gen=audio_gen.float(), audio_len=audio_len
@@ -786,17 +799,6 @@ class AudioCodecModel(ModelPT):
 
             metrics["val_loss_scl"] = loss_scl
             metrics["val_loss"] += metrics["val_loss_scl"]
-
-        if self.use_asr_consitency_loss:
-            # concate generated and GT waveforms
-            audios_batch = torch.cat((audio.squeeze(1), audio_gen.squeeze(1)), dim=0)
-
-            logits, _ = self.phoneme_asr_model(audios_batch)
-            logits_gt, logits_pred = torch.chunk(logits, 2, dim=0)
-
-            loss_acl = torch.nn.functional.mse_loss(logits_pred, logits_gt) * self.acl_loss_scale
-            metrics["val_loss_acl"] = loss_acl
-            metrics["val_loss"] += metrics["val_loss_acl"]
 
         self.log_dict(metrics, on_epoch=True, sync_dist=True)
 
@@ -878,12 +880,11 @@ class AudioCodecModel(ModelPT):
         sched_config = optim_config.pop("sched", None)
         OmegaConf.set_struct(optim_config, True)
 
-        asr_ph_params = self.phoneme_asr_model.parameters() if self.use_asr_consitency_loss else []
         se_params = self.speaker_encoder.parameters() if self.use_scl_loss else []
         vq_params = self.vector_quantizer.parameters() if self.vector_quantizer else []
         slm_params = self.slm_decoder.parameters() if self.slm_decoder else []
         gen_params = itertools.chain(
-            self.audio_encoder.parameters(), self.audio_decoder.parameters(), vq_params, asr_ph_params, se_params, slm_params
+            self.audio_encoder.parameters(), self.audio_decoder.parameters(), vq_params, se_params, slm_params
         )
         optim_g = instantiate(optim_config, params=gen_params)
 

@@ -777,6 +777,8 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
         num_duration_iters: int = 1,
         duration_topk: int = 1,
         duration_temperature: float = 1.0,
+        silence_pad_start: int = 5,
+        silence_pad_end: int = 10,
     ) -> None:
         self.log_audio = log_audio
         self.log_audio_gta = log_audio_gta
@@ -790,6 +792,8 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
         self.num_duration_iters = num_duration_iters
         self.duration_topk = duration_topk
         self.duration_temperature = duration_temperature
+        self.silence_pad_start = silence_pad_start
+        self.silence_pad_end = silence_pad_end
         self.audio_codec = _load_vocoder(
             model_name=audio_codec_name,
             checkpoint_path=audio_codec_path,
@@ -885,6 +889,8 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
                 num_duration_iters=self.num_duration_iters,
                 duration_topk=self.duration_topk,
                 duration_temperature=self.duration_temperature,
+                silence_pad_start=self.silence_pad_start,
+                silence_pad_end=self.silence_pad_end,
             )
         if self.log_audio:
             with torch.no_grad():
@@ -1010,7 +1016,9 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
         self, model: LightningModule, batch_dict: Dict, initial_log: bool = False
     ) -> Tuple[List[AudioArtifact], List[ImageArtifact]]:
 
+        is_train = model.training
         model = model.eval()
+
         audio_codec = self.audio_codec.to(model.device).eval()
 
         dataset_names = batch_dict.get("dataset_names")
@@ -1042,7 +1050,8 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
                 audio_artifacts += audio_pred
                 image_artifacts += dequantized_pred
 
-        model.train()
+        if is_train:
+            model.train()
 
         return audio_artifacts, image_artifacts
 

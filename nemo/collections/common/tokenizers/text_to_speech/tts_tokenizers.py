@@ -701,6 +701,7 @@ class IPATokenizer(BaseTokenizer):
         add_blank_at=None,
         pad_with_space=False,
         skip_oov=True,
+        add_boundaries=False,
     ):
         """General-purpose IPA-based tokenizer.
         Args:
@@ -783,6 +784,11 @@ class IPATokenizer(BaseTokenizer):
         if silence is not None:
             self.silence, tokens = len(tokens), tokens + [silence]
 
+        self.add_boundaries = add_boundaries
+        if self.add_boundaries:
+            self.bos, tokens = len(tokens), tokens + ['<bos>']
+            self.eos, tokens = len(tokens), tokens + ['<eos>']
+
         super().__init__(tokens, oov=oov, sep=sep, add_blank_at=add_blank_at)
 
         self.tokens_set = set(self.tokens)  # To save some repeated work when filtering entries
@@ -847,6 +853,9 @@ class IPATokenizer(BaseTokenizer):
 
         if self.pad_with_space:
             ps = [space] + ps + [space]
+
+        if self.add_boundaries:
+            ps = [self.tokens[self.bos]] + ps + [self.tokens[self.eos]]
 
         # Token index lookups
         return [self._token2id[p] for p in ps]
