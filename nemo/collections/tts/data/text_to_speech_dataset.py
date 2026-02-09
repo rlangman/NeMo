@@ -78,7 +78,7 @@ class DatasetSample:
 
 def create_text_to_speech_dataset(
     dataset_type: str,
-    text_tokenizer: BaseTokenizer,
+    text_tokenizer: Optional[BaseTokenizer] = None,
     dataset_args: Optional[Dict] = None,
     global_rank: Optional[int] = None,
     world_size: Optional[int] = None,
@@ -90,7 +90,7 @@ def create_text_to_speech_dataset(
     else:
         dataset_args = {}
 
-    if not hasattr(text_tokenizer, "set_phone_prob"):
+    if not text_tokenizer or not hasattr(text_tokenizer, "set_phone_prob"):
         phoneme_mode = contextlib.nullcontext()
     elif is_train:
         phoneme_mode = text_tokenizer.set_phone_prob(text_tokenizer.phoneme_probability)
@@ -121,7 +121,7 @@ def text_to_speech_collate_fn(
     batch: List[dict],
     feature_readers: List[FeatureReader],
     feature_processors: List[FeatureProcessor],
-    text_pad_value: int,
+    text_pad_value: Optional[int],
     include_speaker: bool
 ):
     dataset_name_list = []
@@ -134,22 +134,24 @@ def text_to_speech_collate_fn(
         dataset_name_list.append(example["dataset_name"])
         audio_filepath_list.append(example["audio_filepath"])
 
-        token_list.append(example["tokens"])
-        token_len_list.append(example["text_len"])
+        if "tokens" in example:
+            token_list.append(example["tokens"])
+            token_len_list.append(example["text_len"])
 
         if include_speaker:
             speaker_list.append(example["speaker_index"])
 
-    batch_token_len = torch.IntTensor(token_len_list)
-    token_max_len = int(batch_token_len.max().item())
-    batch_tokens = stack_tensors(token_list, max_lens=[token_max_len], pad_value=text_pad_value)
-
     batch_dict = {
         "dataset_names": dataset_name_list,
         "audio_filepaths": audio_filepath_list,
-        "text": batch_tokens,
-        "text_lens": batch_token_len,
     }
+
+    if len(token_list) > 0:
+        batch_token_len = torch.IntTensor(token_len_list)
+        token_max_len = int(batch_token_len.max().item())
+        batch_tokens = stack_tensors(token_list, max_lens=[token_max_len], pad_value=text_pad_value)
+        batch_dict["text"] = batch_tokens
+        batch_dict["text_lens"] = batch_token_len
 
     if include_speaker:
         batch_dict["speaker_id"] = torch.IntTensor(speaker_list)
@@ -190,7 +192,7 @@ class TextToSpeechDataset(Dataset):
     def __init__(
         self,
         dataset_meta: Dict,
-        text_tokenizer: BaseTokenizer,
+        text_tokenizer: Optional[BaseTokenizer],
         weighted_sampling_steps_per_epoch: Optional[int] = None,
         speaker_path: Optional[Path] = None,
         feature_readers: Optional[Dict[str, FeatureReader]] = None,
@@ -203,6 +205,11 @@ class TextToSpeechDataset(Dataset):
         super().__init__()
 
         self.text_tokenizer = text_tokenizer
+        if self.text_tokenizer:
+            self.text_pad_value = self.text_tokenizer.pad
+        else:
+            self.text_pad_value = None
+
         self.weighted_sampling_steps_per_epoch = weighted_sampling_steps_per_epoch
         self.pc_dropout_rate = pc_dropout_rate
 
@@ -315,17 +322,18 @@ class TextToSpeechDataset(Dataset):
 
         _, audio_filepath_rel = get_audio_filepaths(manifest_entry=data.manifest_entry, audio_dir=data.audio_dir)
 
-        tokens = self.text_tokenizer(data.text)
-        tokens = torch.tensor(tokens, dtype=torch.int32)
-        text_len = tokens.shape[0]
-
         example = {
             "dataset_name": data.dataset_name,
             "audio_filepath": audio_filepath_rel,
-            "tokens": tokens,
-            "text_len": text_len,
             "duration": data.manifest_entry["duration"],
         }
+
+        if self.text_tokenizer is not None:
+            tokens = self.text_tokenizer(data.text)
+            tokens = torch.tensor(tokens, dtype=torch.int32)
+            text_len = tokens.shape[0]
+            example["tokens"] = tokens
+            example["text_len"] = text_len
 
         if data.speaker is not None:
             example["speaker"] = data.speaker
@@ -347,7 +355,7 @@ class TextToSpeechDataset(Dataset):
             batch,
             feature_readers=self.feature_readers,
             feature_processors=self.feature_processors,
-            text_pad_value=self.text_tokenizer.pad,
+            text_pad_value=self.text_pad_value,
             include_speaker=self.include_speaker
         )
 
@@ -358,7 +366,7 @@ class TarredTextToSpeechDataset(IterableDataset):
     def __init__(
         self,
         dataset_meta: Dict,
-        text_tokenizer: BaseTokenizer = None,
+        text_tokenizer: Optional[BaseTokenizer] = None,
         sample_type: str = "concat",
         sample_args: Optional[Dict] = None,
         speaker_path: Optional[Path] = None,
@@ -367,7 +375,7 @@ class TarredTextToSpeechDataset(IterableDataset):
         min_duration: Optional[float] = None,
         max_duration: Optional[float] = None,
         min_words: Optional[int] = None,
-        volume_norm: bool = True,
+        volume_norm: bool = False,
         shuffle_n: int = 0,
         shuffle_n_shard: int = 0,
         shard_strategy: str = "scatter",
@@ -377,6 +385,11 @@ class TarredTextToSpeechDataset(IterableDataset):
     ):
         super().__init__()
         self.text_tokenizer = text_tokenizer
+        if self.text_tokenizer:
+            self.text_pad_value = self.text_tokenizer.pad
+        else:
+            self.text_pad_value = None
+
         self.volume_norm = volume_norm
         self.pc_dropout_rate = pc_dropout_rate
 
@@ -490,25 +503,26 @@ class TarredTextToSpeechDataset(IterableDataset):
         data = self.file_to_sample_map[file_id]
         entry = data.manifest_entry
 
-        if "normalized_text" in entry:
-            text = entry["normalized_text"]
-        else:
-            text = entry["text"]
-
-        text = dropout_pc(text=text, dropout_rate=self.pc_dropout_rate)
-
-        tokens = self.text_tokenizer(text)
-        tokens = torch.tensor(tokens, dtype=torch.int32)
-        text_len = tokens.shape[0]
-
         audio_filepath = Path(data.manifest_entry["audio_filepath"])
         example = {
             "dataset_name": data.dataset_name,
             "audio_filepath": audio_filepath,
-            "tokens": tokens,
-            "text_len": text_len,
             "duration": data.manifest_entry["duration"],
         }
+
+        if self.text_tokenizer:
+            if "normalized_text" in entry:
+                text = entry["normalized_text"]
+            else:
+                text = entry["text"]
+
+            text = dropout_pc(text=text, dropout_rate=self.pc_dropout_rate)
+
+            tokens = self.text_tokenizer(text)
+            tokens = torch.tensor(tokens, dtype=torch.int32)
+            text_len = tokens.shape[0]
+            example["tokens"] = tokens
+            example["text_len"] = text_len
 
         if self.include_speaker:
             speaker = entry["speaker"]
@@ -534,7 +548,7 @@ class TarredTextToSpeechDataset(IterableDataset):
             batch,
             feature_readers=self.feature_readers,
             feature_processors=self.feature_processors,
-            text_pad_value=self.text_tokenizer.pad,
+            text_pad_value=self.text_pad_value,
             include_speaker=self.include_speaker,
         )
 
