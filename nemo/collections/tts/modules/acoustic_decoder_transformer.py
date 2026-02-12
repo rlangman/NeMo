@@ -24,6 +24,7 @@ from nemo.core.neural_types.elements import EncodedRepresentation, MaskType
 from nemo.core.neural_types.neural_type import NeuralType
 
 
+
 class LinearFF(nn.Module):
     def __init__(self, d_model, d_inner, dropout):
         super(LinearFF, self).__init__()
@@ -319,6 +320,61 @@ class TransformerCrossAttentionLayer(nn.Module):
         return output
 
 
+class TransformerMultiCrossAttentionLayer(nn.Module):
+    def __init__(
+        self,
+        n_head_self,
+        n_head_cross1,
+        n_head_cross2,
+        d_model,
+        d_head,
+        d_inner,
+        dropout,
+        dropout_self_att,
+        dropout_cross_att,
+        kernel_size,
+    ):
+        super(TransformerMultiCrossAttentionLayer, self).__init__()
+
+        self.self_attn = MultiHeadAttn(
+            n_head=n_head_self,
+            d_model=d_model,
+            d_head=d_head,
+            dropout=dropout,
+            dropatt=dropout_self_att,
+        )
+        self.cross_attn1 = CrossAttn(
+            n_head=n_head_cross1,
+            d_model=d_model,
+            d_encoded=d_model,
+            d_head=d_head,
+            dropout=dropout,
+            dropatt=dropout_cross_att,
+        )
+        self.cross_attn2 = CrossAttn(
+            n_head=n_head_cross2,
+            d_model=d_model,
+            d_encoded=d_model,
+            d_head=d_head,
+            dropout=dropout,
+            dropatt=dropout_cross_att,
+        )
+
+        if kernel_size == 1:
+            self.pos_ff = LinearFF(d_model, d_inner, dropout)
+        else:
+            self.pos_ff = ConvNeXtFF(d_model, d_inner, kernel_size, dropout)
+
+    def forward(self, inputs, encoded1, encoded2, mask, attn_mask1, attn_mask2):
+        mask_3d = rearrange(mask, 'B T -> B T 1')
+        output = self.self_attn(inputs=inputs, mask=mask)
+        output = self.cross_attn1(inputs=output, encoded=encoded1, mask=mask, attn_mask=attn_mask1)
+        output = self.cross_attn2(inputs=output, encoded=encoded2, mask=mask, attn_mask=attn_mask2)
+        output = self.pos_ff(output)
+        output = output * mask_3d
+        return output
+
+
 class ContextTransformer(NeuralModule):
     def __init__(
         self,
@@ -389,8 +445,8 @@ class AudioTransformer(NeuralModule):
         n_layer,
         n_head_self,
         n_head_context,
+        n_head_text,
         d_model,
-        d_context,
         d_head,
         d_inner,
         kernel_size=None,
@@ -401,11 +457,11 @@ class AudioTransformer(NeuralModule):
         super(AudioTransformer, self).__init__()
         self.d_model = d_model
         self.transformer_layers = nn.ModuleList([
-            TransformerCrossAttentionLayer(
+            TransformerMultiCrossAttentionLayer(
                 n_head_self=n_head_self,
-                n_head_cross=n_head_context,
+                n_head_cross1=n_head_context,
+                n_head_cross2=n_head_text,
                 d_model=d_model,
-                d_encoded=d_context,
                 d_head=d_head,
                 d_inner=d_inner,
                 kernel_size=kernel_size,
@@ -423,6 +479,8 @@ class AudioTransformer(NeuralModule):
             "audio_mask": NeuralType(('B', 'T_input'), MaskType()),
             "context": NeuralType(('B', 'T_context', 'D'), EncodedRepresentation()),
             "context_mask": NeuralType(('B', 'T_context'), MaskType()),
+            "text_enc": NeuralType(('B', 'T_text', 'D'), EncodedRepresentation()),
+            "text_mask": NeuralType(('B', 'T_text'), MaskType()),
         }
 
     @property
@@ -432,21 +490,30 @@ class AudioTransformer(NeuralModule):
 
         }
 
-    def forward(self, inputs, audio_mask, context, context_mask):
+    def forward(self, inputs, audio_mask, context, context_mask, text_enc, text_mask):
         audio_mask_3d = rearrange(audio_mask, 'B T_audio -> B T_audio 1')
+        text_mask_3d = rearrange(text_mask, 'B T_text -> B 1 T_text')
+        context_mask_3d = rearrange(context_mask, 'B T_context -> B 1 T_context')
 
         max_context_len = context.shape[1]
-        # [B, T_text, T_context]
+        # [B, T_audio, T_context]
         context_attn_mask = audio_mask_3d.repeat([1, 1, max_context_len])
-        context_attn_mask = context_attn_mask * rearrange(context_mask, 'B T_context -> B 1 T_context')
+        context_attn_mask = context_attn_mask * context_mask_3d
+
+        max_text_len = text_enc.shape[1]
+        # [B, T_audio, T_context]
+        text_attn_mask = audio_mask_3d.repeat([1, 1, max_text_len])
+        text_attn_mask = text_attn_mask * text_mask_3d
 
         out = inputs
         for layer in self.transformer_layers:
             out = layer(
                 inputs=out,
                 mask=audio_mask,
-                encoded=context,
-                attn_mask=context_attn_mask
+                encoded1=context,
+                attn_mask1=context_attn_mask,
+                encoded2=text_enc,
+                attn_mask2=text_attn_mask,
             )
 
         out = out * audio_mask_3d
@@ -470,6 +537,8 @@ class AudioEncoder(NeuralModule):
             "audio_mask": NeuralType(('B', 'T_audio'), MaskType()),
             "context": NeuralType(('B', 'T_context', 'D'), EncodedRepresentation()),
             "context_mask": NeuralType(('B', 'T_context'), MaskType()),
+            "text_enc": NeuralType(('B', 'T_text', 'D'), EncodedRepresentation()),
+            "text_mask": NeuralType(('B', 'T_text'), MaskType()),
         }
 
     @property
@@ -478,7 +547,7 @@ class AudioEncoder(NeuralModule):
             "audio_enc": NeuralType(('B', 'T', 'D'), EncodedRepresentation()),
         }
 
-    def forward(self, inputs, audio_mask, context, context_mask):
+    def forward(self, inputs, audio_mask, context, context_mask, text_enc, text_mask):
         audio_enc = self.input_layer(inputs)
 
         max_audio_len = audio_mask.shape[1]
@@ -488,7 +557,68 @@ class AudioEncoder(NeuralModule):
         audio_enc = audio_enc + pos_emb
         audio_enc = audio_enc * rearrange(audio_mask, 'B T -> B T 1')
         audio_enc = self.transformer(
-            inputs=audio_enc, audio_mask=audio_mask, context=context, context_mask=context_mask
+            inputs=audio_enc, audio_mask=audio_mask, context=context, context_mask=context_mask, text_enc=text_enc, text_mask=text_mask
         )
 
         return audio_enc
+
+
+class TextEncoder(NeuralModule):
+    def __init__(
+        self,
+        n_layer,
+        n_head,
+        n_embed,
+        d_model,
+        d_head,
+        d_inner,
+        kernel_size,
+        padding_idx,
+        dropout=0.1,
+        dropout_att=0.1,
+    ):
+        super(TextEncoder, self).__init__()
+        self.d_model = d_model
+
+        self.word_emb = nn.Embedding(n_embed, d_model, padding_idx=padding_idx)
+        self.pos_emb = PositionalEmbedding(self.d_model)
+        self.text_layers = nn.ModuleList([
+            TransformerLayer(
+                n_head,
+                d_model,
+                d_head,
+                d_inner,
+                kernel_size,
+                dropout,
+                dropatt=dropout_att,
+            )
+            for _ in range(n_layer)
+        ])
+
+    @property
+    def input_types(self):
+        return {
+            "text": NeuralType(('B', 'T_text'), EncodedRepresentation()),
+            "text_mask": NeuralType(('B', 'T_audio'), MaskType()),
+        }
+
+    @property
+    def output_types(self):
+        return {
+            "out": NeuralType(('B', 'T', 'D'), EncodedRepresentation()),
+        }
+
+    @typecheck()
+    def forward(self, text, text_mask):
+        text_emb = self.word_emb(text)
+
+        pos_seq = torch.arange(text_emb.size(1), device=text_emb.device).to(text_emb.dtype)
+        pos_emb = self.pos_emb(pos_seq)
+
+        out = text_emb + pos_emb
+        out = out * rearrange(text_mask, 'B T -> B T 1')
+
+        for layer in self.text_layers:
+            out = layer(out, mask=text_mask)
+
+        return out

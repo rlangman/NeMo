@@ -15,7 +15,8 @@
 import torch
 from einops import rearrange
 
-from nemo.collections.tts.parts.utils.helpers import get_mask_from_lengths
+from nemo.collections.tts.parts.utils.helpers import binarize_attention_parallel, get_mask_from_lengths
+from nemo.collections.tts.parts.utils.tts_dataset_utils import beta_binomial_prior_distribution_torch
 from nemo.core.classes import NeuralModule, typecheck
 from nemo.core.neural_types.elements import (
     EncodedRepresentation,
@@ -23,7 +24,10 @@ from nemo.core.neural_types.elements import (
     IntType,
     LengthsType,
     LogitsType,
+    LogprobsType,
     MaskType,
+    ProbsType,
+    TokenDurationType,
     TokenIndex,
     VoidType
 )
@@ -148,7 +152,6 @@ class ContextEncoder(NeuralModule):
     def output_types(self):
         return {
             "context": NeuralType(('B', 'D', 'T'), EncodedRepresentation()),
-            "context_lens": NeuralType(tuple('B'), LengthsType()),
         }
 
     @typecheck()
@@ -160,7 +163,7 @@ class ContextEncoder(NeuralModule):
         context = self.encoder(inputs=context, mask=mask)
         context = rearrange(context, 'B T D -> B D T')
 
-        return context, audio_lens
+        return context
 
 
 class AudioDecoder(NeuralModule):
@@ -191,6 +194,8 @@ class AudioDecoder(NeuralModule):
             "audio_mask": NeuralType(('B', 'T_audio'), MaskType()),
             "context": NeuralType(('B', 'T_context', 'D'), EncodedRepresentation()),
             "context_mask": NeuralType(('B', 'T_context'), MaskType()),
+            "text_enc": NeuralType(('B', 'T_text', 'D'), EncodedRepresentation()),
+            "text_mask": NeuralType(('B', 'T_text'), MaskType()),
             "audio_codes": NeuralType(('B', 'T_audio', 'C'), EncodedRepresentation()),
             "audio_maskin": NeuralType(('B', 'T_audio'), MaskType()),
             "temperature": NeuralType((), FloatType(), optional=True),
@@ -206,7 +211,7 @@ class AudioDecoder(NeuralModule):
 
     @typecheck()
     def forward(
-        self, inputs, audio_mask, context, context_mask, audio_codes, audio_maskin, temperature=None, topk=None
+        self, inputs, audio_mask, context, context_mask, text_enc, text_mask, audio_codes, audio_maskin, temperature=None, topk=None
     ):
         audio_mask_3d = rearrange(audio_mask, 'B T -> B T 1')
 
@@ -220,7 +225,9 @@ class AudioDecoder(NeuralModule):
         dec_input = inputs + audio_res + mask_res
 
         dec_input = dec_input * audio_mask_3d
-        dec_out = self.fft(inputs=dec_input, audio_mask=audio_mask, context=context, context_mask=context_mask)
+        dec_out = self.fft(
+            inputs=dec_input, audio_mask=audio_mask, context=context, context_mask=context_mask, text_enc=text_enc, text_mask=text_mask
+        )
 
         # [batch_size, audio_len, num_codebook * codebook_size]
         dec_out = self.layer_norm(dec_out)
@@ -268,3 +275,145 @@ class AudioDecoder(NeuralModule):
         audio_tokens = rearrange(audio_tokens, 'B T C -> B C T')
 
         return audio_tokens, audio_logits
+
+
+class Aligner(NeuralModule):
+
+    def __init__(self, alignment_encoder, num_text_emb, text_emb_dim, down_sample_rate=None, prior_scaling_factor=0.2):
+        super().__init__()
+        self.alignment_encoder = alignment_encoder
+        self.text_emb = torch.nn.Embedding(num_text_emb, text_emb_dim)
+        self.down_sample_rate = down_sample_rate
+        self.prior_scaling_factor = prior_scaling_factor
+
+        if self.down_sample_rate:
+            self.downsample_layer = Conv1d(
+                in_channels=text_emb_dim, out_channels=text_emb_dim, kernel_size=3, stride=self.down_sample_rate,
+            )
+        else:
+            self.downsample_layer = None
+
+    def _create_alignment_prior(self, text_lens, text_max_len, audio_lens, audio_max_len):
+        batch_size = text_lens.shape[0]
+        prior_batch = torch.zeros([batch_size, audio_max_len, text_max_len], device=text_lens.device)
+        for i in range(batch_size):
+            text_len = text_lens[i].item()
+            audio_len = audio_lens[i].item()
+            prior = beta_binomial_prior_distribution_torch(
+                phoneme_count=text_len,
+                mel_count=audio_len,
+                scaling_factor=self.prior_scaling_factor,
+                device=text_lens.device,
+            ).to(text_lens.device)
+            prior_batch[i, :audio_len, :text_len] = prior
+
+        return prior_batch
+
+    @typecheck(
+        input_types={
+            "text": NeuralType(('B', 'T_text'), TokenIndex()),
+            "text_lens": NeuralType(tuple('B'), LengthsType()),
+            "audio_codes": NeuralType(('B', 'D', 'T_audio'), EncodedRepresentation()),
+            "audio_lens": NeuralType(tuple('B'), LengthsType()),
+            "context_emb": NeuralType(('B', 'D'), EncodedRepresentation()),
+        },
+        output_types={
+            "durations": NeuralType(('B', 'T_text'), TokenDurationType()),
+            "duration_lens": NeuralType(tuple('B'), LengthsType()),
+            "attn_hard": NeuralType(('B', 'S', 'T_audio', 'T_text'), ProbsType()),
+            "attn_soft": NeuralType(('B', 'S', 'T_audio', 'T_text'), ProbsType()),
+            "attn_logprob": NeuralType(('B', 'S', 'T_audio', 'T_text'), LogprobsType())
+        }
+    )
+    def forward(self, text, text_lens, audio_codes, audio_lens, context_emb):
+        audio_mask = get_mask_from_lengths(audio_lens)
+        text_mask = get_mask_from_lengths(text_lens)
+        # [batch_size, text_len, hidden_dim]
+        text_emb = self.text_emb(text)
+        text_emb = text_emb * rearrange(text_mask, "B T -> B T 1")
+        text_emb = rearrange(text_emb, "B T D -> B D T")
+
+        if self.down_sample_rate:
+            text_lens = torch.ceil(text_lens / self.down_sample_rate).int()
+            text_mask = get_mask_from_lengths(text_lens)
+            text_emb = self.downsample_layer(inputs=text_emb, mask=text_mask)
+
+        attn_mask = rearrange(audio_mask, "B T -> B 1 T 1") * rearrange(text_mask, "B T -> B 1 1 T")
+        # Aligner requires an inverted mask
+        aligner_text_mask = ~rearrange(text_mask, "B T -> B T 1")
+        context_emb = rearrange(context_emb, 'B D -> B 1 D')
+
+        text_max_len = text_emb.shape[2]
+        audio_max_len = audio_codes.shape[2]
+        attn_prior = self._create_alignment_prior(
+            text_lens=text_lens,
+            text_max_len=text_max_len,
+            audio_lens=audio_lens,
+            audio_max_len=audio_max_len,
+        )
+        # [batch_size, 1, audio_len, text_len]
+        attn_soft, attn_logprob = self.alignment_encoder(
+            queries=audio_codes, keys=text_emb, mask=aligner_text_mask, attn_prior=attn_prior, conditioning=context_emb
+        )
+        attn_soft = attn_soft * attn_mask
+        attn_logprob = attn_logprob * attn_mask
+        attn_hard = binarize_attention_parallel(attn=attn_soft, in_lens=text_lens, out_lens=audio_lens)
+
+        durations = attn_hard.sum(2)
+        durations = rearrange(durations, 'B 1 T -> B T')
+
+        return durations, text_lens, attn_hard, attn_soft, attn_logprob
+
+
+class ContextUtteranceEncoder(NeuralModule):
+
+    def __init__(
+        self,
+        input_dim,
+        context_emb_dim,
+        filters,
+        rnn_layers,
+        rnn_dim,
+    ):
+        super(ContextUtteranceEncoder, self).__init__()
+        self.conv1 = Conv1d(
+            in_channels=input_dim,
+            out_channels=filters,
+            activation="elu"
+        )
+        self.conv2 = Conv1d(
+            in_channels=filters,
+            out_channels=filters,
+            activation="elu"
+        )
+        self.rnn = torch.nn.LSTM(input_size=filters, hidden_size=rnn_dim, num_layers=rnn_layers, batch_first=True)
+        self.emb_layer = torch.nn.Linear(in_features=rnn_dim, out_features=context_emb_dim)
+
+    @property
+    def input_types(self):
+        return {
+            "audio_codes": NeuralType(('B', 'C', 'T'), EncodedRepresentation()),
+            "audio_lens": NeuralType(tuple('B'), LengthsType()),
+        }
+
+    @property
+    def output_types(self):
+        return {
+            "context_emb": NeuralType(('B', 'D'), EncodedRepresentation())
+        }
+
+    @typecheck()
+    def forward(self, audio_codes, audio_lens):
+        mask = get_mask_from_lengths(audio_lens)
+
+        out = self.conv1(inputs=audio_codes, mask=mask)
+        out = self.conv2(inputs=out, mask=mask)
+
+        out = rearrange(out, 'B D T -> B T D')
+        out = torch.nn.utils.rnn.pack_padded_sequence(out, audio_lens.cpu(), batch_first=True, enforce_sorted=False)
+        out, _ = self.rnn(out)
+        out, padded_lens = torch.nn.utils.rnn.pad_packed_sequence(out, batch_first=True)
+        # [B, D]
+        out = out[torch.arange(len(padded_lens)), (padded_lens - 1), :]
+        context_emb = self.emb_layer(out)
+        return context_emb

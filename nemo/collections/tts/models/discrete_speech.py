@@ -156,9 +156,6 @@ class DiscreteSpeechModel(ModelPT):
         return text_tokenizer
 
     def parse(self, str_input: str) -> torch.tensor:
-        if self.training:
-            logging.warning("parse() is meant to be called in eval mode.")
-
         if not hasattr(self.text_tokenizer, "set_phone_prob"):
             text_tokens = self.text_tokenizer.encode(str_input)
         else:
@@ -507,7 +504,7 @@ class DiscreteSpeechModel(ModelPT):
             random_sample=False,
             max_len=max_len,
         )
-        context_emb, context, context_lens = self.context_encoder(
+        context_emb, context = self.context_encoder(
             audio_codes=context_codes,
             audio_lens=context_lens,
         )
@@ -529,7 +526,7 @@ class DiscreteSpeechModel(ModelPT):
         # [batch_size, code_dim, audio_token_len]
         context_codes = self.vector_quantizer.decode(indices=context_tokens_rearrange, input_len=context_lens)
 
-        context_emb, context, context_lens = self.context_encoder(
+        context_emb, context = self.context_encoder(
             audio_codes=context_codes,
             audio_lens=context_lens,
         )
@@ -617,7 +614,7 @@ class DiscreteSpeechModel(ModelPT):
                 random_sample=False
             )
 
-        context_emb, context, context_lens = self.context_encoder(
+        context_emb, context = self.context_encoder(
             audio_codes=context_codes,
             audio_lens=context_lens,
         )
@@ -647,8 +644,6 @@ class DiscreteSpeechModel(ModelPT):
                 infill_min=self.duration_infill_min,
                 infill_max=self.duration_infill_max,
             )
-            audio_mask = get_mask_from_lengths(audio_token_sample_lens)
-
             dur_noise = self._add_decoder_duration_noise(durs=dur_sample, text_lens=dur_lens)
         else:
             audio_mask = get_mask_from_lengths(audio_token_sample_lens)
@@ -667,7 +662,6 @@ class DiscreteSpeechModel(ModelPT):
             duration_maskin = duration_maskin * dur_mask
             duration_loss_mask = ~duration_maskin * dur_mask
 
-            audio_codes_noise = audio_codes_sample
             dur_noise = dur_sample
 
         semantic_token_sample = audio_token_sample[:, :self.semantic_codebook_num, :]
@@ -772,7 +766,7 @@ class DiscreteSpeechModel(ModelPT):
             durs=durs,
             random_sample=False
         )
-        context_emb, context, context_lens = self.context_encoder(
+        context_emb, context = self.context_encoder(
             audio_codes=context_codes,
             audio_lens=context_lens,
         )

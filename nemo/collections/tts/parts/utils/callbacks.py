@@ -824,8 +824,11 @@ class AcousticDecoderArtifactGenerator(ArtifactGenerator):
     ) -> List[AudioArtifact]:
 
         audio_artifacts = []
+
         audio_tokens = batch_dict.get("audio_tokens")
         audio_token_lens = batch_dict.get("audio_token_lens")
+        text = batch_dict.get("text")
+        text_lens = batch_dict.get("text_lens")
 
         with torch.no_grad():
             context, context_lens = model.get_context(
@@ -839,6 +842,8 @@ class AcousticDecoderArtifactGenerator(ArtifactGenerator):
                 semantic_lens=audio_token_lens,
                 context=context,
                 context_lens=context_lens,
+                text=text,
+                text_lens=text_lens,
                 num_audio_iters=self.num_audio_iters,
                 num_audio_denoise_iters=self.num_audio_denoise_iters,
                 audio_topk=self.audio_topk,
@@ -1020,6 +1025,8 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
                 semantic_lens=audio_token_lens,
                 context=acoustic_context,
                 context_lens=acoustic_context_lens,
+                text=text,
+                text_lens=text_lens,
                 num_audio_iters=self.num_audio_iters,
                 num_audio_denoise_iters=self.num_audio_denoise_iters,
                 audio_topk=self.audio_topk,
