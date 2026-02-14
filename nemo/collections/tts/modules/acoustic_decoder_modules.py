@@ -315,7 +315,7 @@ class Aligner(NeuralModule):
             "text_lens": NeuralType(tuple('B'), LengthsType()),
             "audio_codes": NeuralType(('B', 'D', 'T_audio'), EncodedRepresentation()),
             "audio_lens": NeuralType(tuple('B'), LengthsType()),
-            "context_emb": NeuralType(('B', 'D'), EncodedRepresentation()),
+            "context_emb": NeuralType(('B', 'D'), EncodedRepresentation(), optional=True),
         },
         output_types={
             "durations": NeuralType(('B', 'T_text'), TokenDurationType()),
@@ -325,7 +325,7 @@ class Aligner(NeuralModule):
             "attn_logprob": NeuralType(('B', 'S', 'T_audio', 'T_text'), LogprobsType())
         }
     )
-    def forward(self, text, text_lens, audio_codes, audio_lens, context_emb):
+    def forward(self, text, text_lens, audio_codes, audio_lens, context_emb=None):
         audio_mask = get_mask_from_lengths(audio_lens)
         text_mask = get_mask_from_lengths(text_lens)
         # [batch_size, text_len, hidden_dim]
@@ -341,7 +341,9 @@ class Aligner(NeuralModule):
         attn_mask = rearrange(audio_mask, "B T -> B 1 T 1") * rearrange(text_mask, "B T -> B 1 1 T")
         # Aligner requires an inverted mask
         aligner_text_mask = ~rearrange(text_mask, "B T -> B T 1")
-        context_emb = rearrange(context_emb, 'B D -> B 1 D')
+
+        if context_emb is not None:
+            context_emb = rearrange(context_emb, 'B D -> B 1 D')
 
         text_max_len = text_emb.shape[2]
         audio_max_len = audio_codes.shape[2]

@@ -85,7 +85,11 @@ class AcousticDecoderModel(ModelPT):
         self.context_encoder = instantiate(cfg.context_encoder)
         self.semantic_layer = instantiate(cfg.semantic_layer)
 
-        self.context_aligner_encoder = instantiate(cfg.context_aligner_encoder)
+        if "context_aligner_encoder" in cfg:
+            self.context_aligner_encoder = instantiate(cfg.context_aligner_encoder)
+        else:
+            self.context_aligner_encoder = None
+
         self.aligner = instantiate(cfg.aligner, num_text_emb=num_text_embed)
 
         # Infilling hyperparameters
@@ -469,7 +473,11 @@ class AcousticDecoderModel(ModelPT):
         # [batch_size, code_dim, audio_token_len]
         audio_codes = self.vector_quantizer.decode(indices=audio_tokens_rearrange, input_len=audio_token_lens).detach()
 
-        context_aligner_emb = self.context_aligner_encoder(audio_codes=audio_codes, audio_lens=audio_token_lens)
+        if self.context_aligner_encoder is not None:
+            context_aligner_emb = self.context_aligner_encoder(audio_codes=audio_codes, audio_lens=audio_token_lens)
+        else:
+            context_aligner_emb = None
+
         # [batch_size, text_len], [batch_size, audio_token_len, text_len], ...
         durs, _, align_hard, align_soft, align_logits = self.aligner(
             text=text,
@@ -615,8 +623,8 @@ class AcousticDecoderModel(ModelPT):
         metrics = {
             "t_audio_token_loss": audio_token_loss,
             "t_audio_token_post_loss": audio_token_post_loss,
-            "t_ctc_loss": train_ctc_loss,
-            "t_bin_loss": train_bin_loss,
+            "t_ctc_loss": ctc_loss,
+            "t_bin_loss": bin_loss,
         }
         self.log_dict(metrics, on_step=True, sync_dist=True)
         self.log("t_loss", audio_token_loss, prog_bar=True, logger=False, sync_dist=True)
