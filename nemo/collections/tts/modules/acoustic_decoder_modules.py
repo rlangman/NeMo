@@ -279,19 +279,11 @@ class AudioDecoder(NeuralModule):
 
 class Aligner(NeuralModule):
 
-    def __init__(self, alignment_encoder, num_text_emb, text_emb_dim, down_sample_rate=None, prior_scaling_factor=0.2):
+    def __init__(self, alignment_encoder, num_text_emb, text_emb_dim, prior_scaling_factor=0.2):
         super().__init__()
         self.alignment_encoder = alignment_encoder
         self.text_emb = torch.nn.Embedding(num_text_emb, text_emb_dim)
-        self.down_sample_rate = down_sample_rate
         self.prior_scaling_factor = prior_scaling_factor
-
-        if self.down_sample_rate:
-            self.downsample_layer = Conv1d(
-                in_channels=text_emb_dim, out_channels=text_emb_dim, kernel_size=3, stride=self.down_sample_rate,
-            )
-        else:
-            self.downsample_layer = None
 
     def _create_alignment_prior(self, text_lens, text_max_len, audio_lens, audio_max_len):
         batch_size = text_lens.shape[0]
@@ -315,17 +307,16 @@ class Aligner(NeuralModule):
             "text_lens": NeuralType(tuple('B'), LengthsType()),
             "audio_codes": NeuralType(('B', 'D', 'T_audio'), EncodedRepresentation()),
             "audio_lens": NeuralType(tuple('B'), LengthsType()),
-            "context_emb": NeuralType(('B', 'D'), EncodedRepresentation(), optional=True),
+            "conditioning": NeuralType(('B', 'D'), EncodedRepresentation(), optional=True),
         },
         output_types={
             "durations": NeuralType(('B', 'T_text'), TokenDurationType()),
-            "duration_lens": NeuralType(tuple('B'), LengthsType()),
             "attn_hard": NeuralType(('B', 'S', 'T_audio', 'T_text'), ProbsType()),
             "attn_soft": NeuralType(('B', 'S', 'T_audio', 'T_text'), ProbsType()),
             "attn_logprob": NeuralType(('B', 'S', 'T_audio', 'T_text'), LogprobsType())
         }
     )
-    def forward(self, text, text_lens, audio_codes, audio_lens, context_emb=None):
+    def forward(self, text, text_lens, audio_codes, audio_lens, conditioning=None):
         audio_mask = get_mask_from_lengths(audio_lens)
         text_mask = get_mask_from_lengths(text_lens)
         # [batch_size, text_len, hidden_dim]
@@ -333,17 +324,12 @@ class Aligner(NeuralModule):
         text_emb = text_emb * rearrange(text_mask, "B T -> B T 1")
         text_emb = rearrange(text_emb, "B T D -> B D T")
 
-        if self.down_sample_rate:
-            text_lens = torch.ceil(text_lens / self.down_sample_rate).int()
-            text_mask = get_mask_from_lengths(text_lens)
-            text_emb = self.downsample_layer(inputs=text_emb, mask=text_mask)
-
         attn_mask = rearrange(audio_mask, "B T -> B 1 T 1") * rearrange(text_mask, "B T -> B 1 1 T")
         # Aligner requires an inverted mask
         aligner_text_mask = ~rearrange(text_mask, "B T -> B T 1")
 
-        if context_emb is not None:
-            context_emb = rearrange(context_emb, 'B D -> B 1 D')
+        if conditioning is not None:
+            conditioning = rearrange(conditioning, 'B D -> B 1 D')
 
         text_max_len = text_emb.shape[2]
         audio_max_len = audio_codes.shape[2]
@@ -355,7 +341,7 @@ class Aligner(NeuralModule):
         )
         # [batch_size, 1, audio_len, text_len]
         attn_soft, attn_logprob = self.alignment_encoder(
-            queries=audio_codes, keys=text_emb, mask=aligner_text_mask, attn_prior=attn_prior, conditioning=context_emb
+            queries=audio_codes, keys=text_emb, mask=aligner_text_mask, attn_prior=attn_prior, conditioning=conditioning
         )
         attn_soft = attn_soft * attn_mask
         attn_logprob = attn_logprob * attn_mask
@@ -364,7 +350,7 @@ class Aligner(NeuralModule):
         durations = attn_hard.sum(2)
         durations = rearrange(durations, 'B 1 T -> B T')
 
-        return durations, text_lens, attn_hard, attn_soft, attn_logprob
+        return durations, attn_hard, attn_soft, attn_logprob
 
 
 class ContextUtteranceEncoder(NeuralModule):

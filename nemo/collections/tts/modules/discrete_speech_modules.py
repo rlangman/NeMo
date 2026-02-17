@@ -16,7 +16,7 @@ import torch
 from einops import rearrange
 
 from nemo.collections.tts.modules.acoustic_decoder_modules import sample_tokens, Conv1d
-from nemo.collections.tts.parts.utils.helpers import get_mask_from_lengths
+from nemo.collections.tts.parts.utils.helpers import  get_mask_from_lengths, regulate_len
 from nemo.core.classes import NeuralModule, typecheck
 from nemo.core.neural_types.elements import (
     EncodedRepresentation,
@@ -25,6 +25,7 @@ from nemo.core.neural_types.elements import (
     LengthsType,
     LogitsType,
     MaskType,
+    TokenDurationType,
     TokenIndex,
 )
 from nemo.core.neural_types.neural_type import NeuralType
@@ -355,3 +356,33 @@ class AudioDecoder(NeuralModule):
         audio_tokens = rearrange(audio_tokens, 'B T C -> B C T')
 
         return audio_tokens, audio_logits
+
+
+class TextConditioningLayer(NeuralModule):
+
+    def __init__(self, text_emb_dim, num_text_emb):
+        super(TextConditioningLayer, self).__init__()
+        self.text_embeddings = torch.nn.Embedding(num_text_emb, text_emb_dim)
+
+    @property
+    def input_types(self):
+        return {
+            "inputs": NeuralType(('B', 'T', 'D'), EncodedRepresentation()),
+            "text": NeuralType(('B', 'T', 'C'), EncodedRepresentation()),
+            "durations": NeuralType(('B', 'T_text'), TokenDurationType()),
+            "audio_mask": NeuralType(('B', 'T'), MaskType()),
+        }
+
+    @property
+    def output_types(self):
+        return {
+            "out": NeuralType(('B', 'T', 'C'), EncodedRepresentation()),
+        }
+
+    @typecheck()
+    def forward(self, inputs, text, durations, audio_mask):
+        text_emb = self.text_embeddings(text)
+        text_emb_repeated, _ = regulate_len(durations=durations, enc_out=text_emb)
+        out = inputs + text_emb_repeated
+        out = out * rearrange(audio_mask, 'B T -> B T 1')
+        return out

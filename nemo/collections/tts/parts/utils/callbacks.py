@@ -928,10 +928,7 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
         num_audio_denoise_iters: int = 0,
         audio_topk: int = 1,
         audio_temperature: float = 1.0,
-        num_duration_iters: int = 1,
-        duration_topk: int = 1,
-        duration_temperature: float = 1.0,
-        silence_pad_start: int = 10,
+        silence_pad_start: int = 5,
         silence_pad_end: int = 10,
     ) -> None:
         self.log_audio = log_audio
@@ -941,9 +938,6 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
         self.num_audio_denoise_iters =  num_audio_denoise_iters
         self.audio_topk = audio_topk
         self.audio_temperature = audio_temperature
-        self.num_duration_iters = num_duration_iters
-        self.duration_topk = duration_topk
-        self.duration_temperature = duration_temperature
         self.silence_pad_start = silence_pad_start
         self.silence_pad_end = silence_pad_end
         self.audio_codec = _load_vocoder(
@@ -1013,9 +1007,6 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
                 num_audio_iters=self.num_audio_iters,
                 audio_topk=self.audio_topk,
                 audio_temperature=self.audio_temperature,
-                num_duration_iters=self.num_duration_iters,
-                duration_topk=self.duration_topk,
-                duration_temperature=self.duration_temperature,
                 silence_pad_start=self.silence_pad_start,
                 silence_pad_end=self.silence_pad_end,
             )
@@ -1070,7 +1061,7 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
         audio_token_lens = batch_dict.get("audio_token_lens")
 
         with torch.no_grad():
-            semantic_tokens_pred, context, context_lens, dur_lens, align, balign = model.infer_gta(
+            semantic_tokens_pred, align, dalign = model.infer_gta(
                 text=text,
                 text_lens=text_lens,
                 audio_tokens=audio_tokens,
@@ -1094,7 +1085,7 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
 
         if self.log_alignment:
             align = rearrange(align, "B 1 T_audio T_text -> B T_text T_audio")
-            balign = rearrange(balign, "B 1 T_audio T_text -> B T_text T_audio")
+            dalign = rearrange(dalign, "B 1 T_audio T_text -> B T_text T_audio")
             for i, (dataset_name, audio_id) in enumerate(zip(dataset_names, audio_ids)):
                 align_path = Path(f"{dataset_name}/{audio_id}_align.png")
                 align_i = align[i, : text_lens[i], : audio_token_lens[i]].cpu().numpy()
@@ -1107,14 +1098,14 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
                 )
                 image_artifacts.append(alignment_artifact)
 
-                balign_path = Path(f"{dataset_name}/{audio_id}_align_biphone.png")
-                balign_i = balign[i, : dur_lens[i], : audio_token_lens[i]].cpu().numpy()
+                dalign_path = Path(f"{dataset_name}/{audio_id}_align_decoder.png")
+                dalign_i = dalign[i, : text_lens[i], : audio_token_lens[i]].cpu().numpy()
                 alignment_artifact = ImageArtifact(
-                    id=f"align_biphone_{audio_id}",
-                    data=balign_i,
-                    filepath=balign_path,
-                    x_axis="Audio Tokens",
-                    y_axis="Biphone Tokens",
+                    id=f"align_decoder_{audio_id}",
+                    data=dalign_i,
+                    filepath=dalign_path,
+                    x_axis="Decoder Tokens",
+                    y_axis="Text Tokens",
                 )
                 image_artifacts.append(alignment_artifact)
 

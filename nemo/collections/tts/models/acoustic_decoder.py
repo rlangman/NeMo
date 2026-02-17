@@ -85,11 +85,6 @@ class AcousticDecoderModel(ModelPT):
         self.context_encoder = instantiate(cfg.context_encoder)
         self.semantic_layer = instantiate(cfg.semantic_layer)
 
-        if "context_aligner_encoder" in cfg:
-            self.context_aligner_encoder = instantiate(cfg.context_aligner_encoder)
-        else:
-            self.context_aligner_encoder = None
-
         self.aligner = instantiate(cfg.aligner, num_text_emb=num_text_embed)
 
         # Infilling hyperparameters
@@ -473,18 +468,12 @@ class AcousticDecoderModel(ModelPT):
         # [batch_size, code_dim, audio_token_len]
         audio_codes = self.vector_quantizer.decode(indices=audio_tokens_rearrange, input_len=audio_token_lens).detach()
 
-        if self.context_aligner_encoder is not None:
-            context_aligner_emb = self.context_aligner_encoder(audio_codes=audio_codes, audio_lens=audio_token_lens)
-        else:
-            context_aligner_emb = None
-
         # [batch_size, text_len], [batch_size, audio_token_len, text_len], ...
-        durs, _, align_hard, align_soft, align_logits = self.aligner(
+        durs, align_hard, align_soft, align_logits = self.aligner(
             text=text,
             text_lens=text_lens,
             audio_codes=audio_codes,
             audio_lens=audio_token_lens,
-            context_emb=context_aligner_emb,
         )
 
         if self.training:

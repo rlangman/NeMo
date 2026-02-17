@@ -28,86 +28,78 @@ from nemo.core.neural_types.neural_type import NeuralType
 class TextEncoder(NeuralModule):
     def __init__(
         self,
-        n_layer,
-        n_head,
-        n_embed,
-        d_model,
-        d_context,
-        d_head,
-        d_inner,
-        kernel_size,
+        num_text_emb,
         padding_idx,
-        dropout=0.1,
-        dropout_att=0.1,
-        down_sample_rate=2,
-        down_sample_kernel_size=3,
+        d_context,
+        transformer,
     ):
         super(TextEncoder, self).__init__()
-        self.d_model = d_model
+        self.d_model = transformer.d_model
 
-        self.word_emb = nn.Embedding(n_embed, d_model, padding_idx=padding_idx)
-        self.pos_emb = PositionalEmbedding(self.d_model)
+        self.text_embeddings = nn.Embedding(num_text_emb, self.d_model, padding_idx=padding_idx)
+        self.filler_embedding = torch.nn.Parameter(torch.zeros([1, 1, self.d_model]))
+        self.positional_embedding = PositionalEmbedding(self.d_model)
         self.context_cond_layer = torch.nn.Linear(d_context, self.d_model)
-        self.text_layers = nn.ModuleList([
-            TransformerLayer(
-                n_head,
-                d_model,
-                d_head,
-                d_inner,
-                kernel_size,
-                dropout,
-                dropatt=dropout_att,
-            )
-            for _ in range(n_layer)
-        ])
-        self.down_sample_rate = down_sample_rate
-        padding = (down_sample_kernel_size - down_sample_rate + 1) // 2
-        self.downsample_layer = nn.Conv1d(
-            in_channels=d_model, out_channels=d_model, kernel_size=down_sample_kernel_size, stride=self.down_sample_rate, padding=padding,
-        )
+        self.transformer = transformer
+
+    def _create_padded_input(
+        self,
+        text,
+        text_mask,
+        audio_mask,
+        context_emb,
+    ):
+        max_text_len = text_mask.shape[1]
+        max_audio_len = audio_mask.shape[1]
+        audio_mask_3d = rearrange(audio_mask, 'B T -> B T 1')
+
+        # [B, T, D]
+        text_emb = self.text_embeddings(text)
+        text_mask_padded = torch.nn.functional.pad(text_mask, pad=[0, max_audio_len - max_text_len])
+        text_emb = torch.nn.functional.pad(text_emb, pad=[0, 0, 0, max_audio_len - max_text_len])
+
+        filler_tokens = torch.ones_like(text_emb, device=text_emb.device) * self.filler_embedding
+        filler_mask = torch.logical_xor(audio_mask, text_mask_padded)
+        filler_mask = rearrange(filler_mask, 'B T -> B T 1')
+        filler_tokens = filler_tokens * filler_mask
+
+        context_emb = rearrange(context_emb, 'B D -> B 1 D')
+        context_res = self.context_cond_layer(context_emb)
+
+        pos_seq = torch.arange(max_audio_len, device=text_emb.device).to(text_emb.dtype)
+        pos_emb = self.positional_embedding(pos_seq)
+
+        encoder_input = text_emb + filler_tokens + context_res + pos_emb
+        encoder_input = encoder_input * audio_mask_3d
+
+        return encoder_input
 
     @property
     def input_types(self):
         return {
             "text": NeuralType(('B', 'T_text'), EncodedRepresentation()),
             "text_lens": NeuralType(('B'), LengthsType()),
+            "audio_lens": NeuralType(('B'), LengthsType()),
             "context_emb": NeuralType(('B', 'D'), EncodedRepresentation()),
+            "context": NeuralType(('B', 'T_context', 'D'), EncodedRepresentation()),
+            "context_mask": NeuralType(('B', 'T_context'), MaskType()),
         }
 
     @property
     def output_types(self):
         return {
             "out": NeuralType(('B', 'T', 'D'), EncodedRepresentation()),
-            "out_lens": NeuralType(tuple('B'), LengthsType()),
         }
 
     @typecheck()
-    def forward(self, text, text_lens, context_emb):
+    def forward(self, text, text_lens, audio_lens, context_emb, context, context_mask):
         text_mask = get_mask_from_lengths(text_lens)
-        text_emb = self.word_emb(text)
+        audio_mask = get_mask_from_lengths(audio_lens)
 
-        pos_seq = torch.arange(text_emb.size(1), device=text_emb.device).to(text_emb.dtype)
-        pos_emb = self.pos_emb(pos_seq)
+        out = self._create_padded_input(text=text, text_mask=text_mask, audio_mask=audio_mask, context_emb=context_emb)
+        out = self.transformer(inputs=out, audio_mask=audio_mask, context=context, context_mask=context_mask)
 
-        out = text_emb + pos_emb
-        out = out * rearrange(text_mask, 'B T -> B T 1')
-
-        for layer in self.text_layers:
-            out = layer(out, mask=text_mask)
-
-        out_lens = torch.ceil(text_lens / self.down_sample_rate).int()
-        out_mask = get_mask_from_lengths(out_lens)
-
-        out = rearrange(out, 'B T D -> B D T')
-        out = self.downsample_layer(out)
-        out = rearrange(out, 'B D T -> B T D')
-
-        context_emb = rearrange(context_emb, 'B D -> B 1 D')
-        context_res = self.context_cond_layer(context_emb)
-        out = out + context_res
-        out = out * rearrange(out_mask, 'B T -> B T 1')
-
-        return out, out_lens
+        return out
 
 
 class DurationTransformer(NeuralModule):
