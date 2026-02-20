@@ -1335,8 +1335,8 @@ class DiscreteSpeechModel(ModelPT):
         duration_topk=None,
         duration_temperature=None,
         speaking_rate=None,
-        silence_pad_start=5,
-        silence_pad_end=10,
+        silence_pad_start=2,
+        silence_pad_end=5,
         min_speaking_rate=-0.5,
         max_speaking_rate=0.5,
     ):

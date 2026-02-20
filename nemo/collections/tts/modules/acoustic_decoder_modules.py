@@ -130,42 +130,6 @@ class SemanticInputLayer(NeuralModule):
         return out
 
 
-class ContextEncoder(NeuralModule):
-
-    def __init__(self, input_dim, encoder):
-        super(ContextEncoder, self).__init__()
-        d_model = encoder.d_model
-        self.pre_conv = Conv1d(
-            in_channels=input_dim,
-            out_channels=d_model
-        )
-        self.encoder = encoder
-
-    @property
-    def input_types(self):
-        return {
-            "audio_codes": NeuralType(('B', 'C', 'T_audio'), EncodedRepresentation()),
-            "audio_lens": NeuralType(tuple('B'), LengthsType()),
-        }
-
-    @property
-    def output_types(self):
-        return {
-            "context": NeuralType(('B', 'D', 'T'), EncodedRepresentation()),
-        }
-
-    @typecheck()
-    def forward(self, audio_codes, audio_lens):
-        mask = get_mask_from_lengths(audio_lens)
-        context = self.pre_conv(inputs=audio_codes, mask=mask)
-
-        context = rearrange(context, 'B D T -> B T D')
-        context = self.encoder(inputs=context, mask=mask)
-        context = rearrange(context, 'B T D -> B D T')
-
-        return context
-
-
 class AudioDecoder(NeuralModule):
 
     def __init__(self, fft, num_codebooks, codebook_size, codebook_dim):
@@ -192,8 +156,6 @@ class AudioDecoder(NeuralModule):
         return {
             "inputs": NeuralType(('B', 'T_audio', 'D'), EncodedRepresentation()),
             "audio_mask": NeuralType(('B', 'T_audio'), MaskType()),
-            "context": NeuralType(('B', 'T_context', 'D'), EncodedRepresentation()),
-            "context_mask": NeuralType(('B', 'T_context'), MaskType()),
             "text_enc": NeuralType(('B', 'T_text', 'D'), EncodedRepresentation()),
             "text_mask": NeuralType(('B', 'T_text'), MaskType()),
             "audio_codes": NeuralType(('B', 'T_audio', 'C'), EncodedRepresentation()),
@@ -211,7 +173,7 @@ class AudioDecoder(NeuralModule):
 
     @typecheck()
     def forward(
-        self, inputs, audio_mask, context, context_mask, text_enc, text_mask, audio_codes, audio_maskin, temperature=None, topk=None
+        self, inputs, audio_mask, text_enc, text_mask, audio_codes, audio_maskin, temperature=None, topk=None
     ):
         audio_mask_3d = rearrange(audio_mask, 'B T -> B T 1')
 
@@ -226,7 +188,7 @@ class AudioDecoder(NeuralModule):
 
         dec_input = dec_input * audio_mask_3d
         dec_out = self.fft(
-            inputs=dec_input, audio_mask=audio_mask, context=context, context_mask=context_mask, text_enc=text_enc, text_mask=text_mask
+            inputs=dec_input, audio_mask=audio_mask, text_enc=text_enc, text_mask=text_mask
         )
 
         # [batch_size, audio_len, num_codebook * codebook_size]
