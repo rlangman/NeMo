@@ -1069,12 +1069,11 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
                 audio_temperature=self.audio_temperature,
                 audio_topk=self.audio_topk,
             )
-            acoustic_context, acoustic_context_lens = acoustic_decoder.get_context(audio_tokens=audio_tokens, audio_lens=audio_token_lens)
             acoustic_tokens_pred = acoustic_decoder.infer(
                 semantic_tokens=semantic_tokens_pred,
                 semantic_lens=audio_token_lens,
-                context=acoustic_context,
-                context_lens=acoustic_context_lens,
+                text=text,
+                text_lens=text_lens,
                 num_audio_iters=self.num_audio_iters,
                 num_audio_denoise_iters=self.num_audio_denoise_iters,
                 audio_topk=self.audio_topk,
