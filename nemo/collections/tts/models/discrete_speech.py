@@ -101,9 +101,17 @@ class DiscreteSpeechModel(ModelPT):
         else:
             self.context_aligner_encoder = None
 
+        self.text_down_sample_rate = cfg.get("text_down_sample_rate", 3)
+
             # Aligner definition
         self.phoneme_aligner = instantiate(cfg.aligner, num_text_emb=num_text_embed)
-        self.biphone_aligner = instantiate(cfg.aligner, num_text_emb=num_text_embed, down_sample_rate=2)
+
+        if self.text_down_sample_rate == 1:
+            self.multiphone_aligner = self.phoneme_aligner
+        elif self.text_down_sample_rate > 1:
+            self.multiphone_aligner = instantiate(cfg.aligner, num_text_emb=num_text_embed, down_sample_rate=self.text_down_sample_rate)
+        else:
+            raise ValueError(f"text_down_sample_rate must be >= 1")
 
         # Infilling hyperparameters
         self.semantic_infill_min = cfg.get("semantic_infill_min", 0.05)
@@ -622,7 +630,7 @@ class DiscreteSpeechModel(ModelPT):
         speaking_rate, speaking_rate_indices = self.get_speaking_rate(text_lens=text_lens, durs=durs)
         speaking_rate = speaking_rate.detach()
 
-        dur_sample, dur_lens, balign_hard, balign_soft, balign_logits = self.biphone_aligner(
+        dur_sample, dur_lens, balign_hard, balign_soft, balign_logits = self.multiphone_aligner(
             text=text_sample,
             text_lens=text_sample_lens,
             audio_codes=audio_codes_sample,
@@ -771,7 +779,7 @@ class DiscreteSpeechModel(ModelPT):
             audio_lens=context_lens,
         )
 
-        durs, _, _, balign_soft, _ = self.biphone_aligner(
+        durs, _, _, balign_soft, _ = self.multiphone_aligner(
             text=text,
             text_lens=text_lens,
             audio_codes=audio_codes,
@@ -1335,7 +1343,7 @@ class DiscreteSpeechModel(ModelPT):
         duration_topk=None,
         duration_temperature=None,
         speaking_rate=None,
-        silence_pad_start=2,
+        silence_pad_start=None,
         silence_pad_end=5,
         min_speaking_rate=-0.5,
         max_speaking_rate=0.5,

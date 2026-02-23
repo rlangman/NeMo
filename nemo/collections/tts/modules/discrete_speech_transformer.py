@@ -39,8 +39,7 @@ class TextEncoder(NeuralModule):
         padding_idx,
         dropout=0.1,
         dropout_att=0.1,
-        down_sample_rate=2,
-        down_sample_kernel_size=3,
+        down_sample_rate=3,
     ):
         super(TextEncoder, self).__init__()
         self.d_model = d_model
@@ -61,7 +60,8 @@ class TextEncoder(NeuralModule):
             for _ in range(n_layer)
         ])
         self.down_sample_rate = down_sample_rate
-        padding = (down_sample_kernel_size - down_sample_rate + 1) // 2
+        down_sample_kernel_size = 2 * self.down_sample_rate - 1
+        padding = down_sample_kernel_size // 2
         self.downsample_layer = nn.Conv1d(
             in_channels=d_model, out_channels=d_model, kernel_size=down_sample_kernel_size, stride=self.down_sample_rate, padding=padding,
         )

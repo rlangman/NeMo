@@ -34,10 +34,6 @@ from nemo.core.neural_types.elements import (
 from nemo.core.neural_types.neural_type import NeuralType
 
 
-def get_padding(kernel_size: int, stride: int) -> int:
-    return (kernel_size - stride + 1) // 2
-
-
 def sample_tokens(logits, temperature, topk):
     batch_shape = logits.shape[:-1]
     # [B, codebook_size]
@@ -63,7 +59,7 @@ def sample_tokens(logits, temperature, topk):
 class Conv1d(NeuralModule):
     def __init__(self, in_channels: int, out_channels: int, kernel_size: int = 3, stride: int = 1, activation=None):
         super().__init__()
-        padding = get_padding(kernel_size=kernel_size, stride=stride)
+        padding = kernel_size // 2
         self.conv = torch.nn.Conv1d(
             in_channels=in_channels,
             out_channels=out_channels,
@@ -249,8 +245,9 @@ class Aligner(NeuralModule):
         self.prior_scaling_factor = prior_scaling_factor
 
         if self.down_sample_rate:
+            kernel_size = 2 * down_sample_rate - 1
             self.downsample_layer = Conv1d(
-                in_channels=text_emb_dim, out_channels=text_emb_dim, kernel_size=3, stride=self.down_sample_rate,
+                in_channels=text_emb_dim, out_channels=text_emb_dim, kernel_size=kernel_size, stride=self.down_sample_rate,
             )
         else:
             self.downsample_layer = None
