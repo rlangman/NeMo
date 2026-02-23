@@ -29,13 +29,10 @@ codebook_size: 4096
 semantic_codebook_num: 1
 semantic_codebook_dim: 6
 
-acoustic_codebook_num: 7
-acoustic_codebook_dim: 42
-
 context_min_len: 50
 context_max_len: 125
 
-num_duration: 15
+num_duration: 20
 num_speaking_rate: 41
 
 fps_max: -1.2
@@ -59,6 +56,7 @@ audio_hidden_dim: 512
 audio_filters: 2048
 
 model:
+  text_down_sample_rate: 3
   inference_phoneme_probability: 1.0
 
   context_min_len: ${context_min_len}
@@ -68,8 +66,6 @@ model:
 
   semantic_codebook_num: ${semantic_codebook_num}
   semantic_codebook_dim: ${semantic_codebook_dim}
-  acoustic_codebook_num: ${acoustic_codebook_num}
-  acoustic_codebook_dim: ${acoustic_codebook_dim}
 
   vector_quantizer:
     _target_: nemo.collections.tts.modules.audio_codec_modules.GroupFiniteScalarQuantizer
@@ -79,11 +75,6 @@ model:
   vector_quantizer_semantic:
     _target_: nemo.collections.tts.modules.audio_codec_modules.GroupFiniteScalarQuantizer
     num_groups: ${semantic_codebook_num}
-    num_levels_per_group: ${codebook_levels}
-
-  vector_quantizer_acoustic:
-    _target_: nemo.collections.tts.modules.audio_codec_modules.GroupFiniteScalarQuantizer
-    num_groups: ${acoustic_codebook_num}
     num_levels_per_group: ${codebook_levels}
 
   text_tokenizer:
@@ -157,7 +148,7 @@ model:
         log_audio: true
         log_audio_gta: false
         log_alignment: false
-        num_audio_iters: 10
+        num_audio_iters: 20
         num_duration_iters: 10
 
     dataset:

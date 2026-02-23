@@ -924,8 +924,8 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
         num_duration_iters: int = 1,
         duration_topk: int = 1,
         duration_temperature: float = 1.0,
-        silence_pad_start: int = 10,
-        silence_pad_end: int = 10,
+        silence_pad_start: int = None,
+        silence_pad_end: int = None,
     ) -> None:
         self.log_audio = log_audio
         self.log_audio_gta = log_audio_gta

@@ -164,12 +164,8 @@ class AudioCodecModel(ModelPT):
 
             self.semantic_codec.eval()
             self.semantic_codec.freeze()
-            self.acoustic_dropout_rate = cfg.get("acoustic_dropout_rate", 0.0)
-            self.codebook_dropout_rate = cfg.get("codebook_dropout_rate", 0.0)
         else:
             self.semantic_codec = None
-            self.acoustic_dropout_rate = 0.0
-            self.codebook_dropout_rate = 0.0
 
         # Mel loss setup
         loss_resolutions = cfg.loss_resolutions
@@ -568,13 +564,6 @@ class AudioCodecModel(ModelPT):
         audio, audio_len = self.pad_audio(audio=audio, audio_len=audio_len, samples_per_frame=self.samples_per_frame)
         return audio, audio_len
 
-    def _codebook_dropout(self, encoded):
-        batch_size = encoded.shape[0]
-        acoustic_mask = torch.rand(size=[batch_size, 1, 1], device=encoded.device) >= self.acoustic_dropout_rate
-        codebook_mask = torch.rand(size=encoded.shape, device=encoded.device) >= self.codebook_dropout_rate
-        out = encoded * acoustic_mask * codebook_mask
-        return out
-
     def _process_batch(self, batch):
         # [B, T_audio]
         audio = batch.get("audio")
@@ -602,12 +591,6 @@ class AudioCodecModel(ModelPT):
             encoded = encoded.to(encoded.dtype)  # make sure encoded is converted to the right dtype
         else:
             commit_loss = 0.0
-
-        if self.training and self.codebook_dropout_rate:
-            semantic_input = encoded[:, :self.semantic_codec.vector_quantizer.codebook_dim, :]
-            acoustic_input = encoded[:, self.semantic_codec.vector_quantizer.codebook_dim:, :]
-            acoustic_input = self._codebook_dropout(acoustic_input)
-            encoded = torch.concat([semantic_input, acoustic_input], dim=1)
 
         # [B, T]
         audio_gen, _ = self.audio_decoder(inputs=encoded, input_len=encoded_len)
@@ -705,9 +688,9 @@ class AudioCodecModel(ModelPT):
                 metrics["g_loss_feature"] = loss_feature
                 generator_losses.append(self.feature_loss_scale * loss_feature)
 
-            if self.commit_loss_scale:
-                metrics["g_loss_commit"] = commit_loss
-                generator_losses.append(self.commit_loss_scale * commit_loss)
+        if self.commit_loss_scale:
+            metrics["g_loss_commit"] = commit_loss
+            generator_losses.append(self.commit_loss_scale * commit_loss)
 
         if self.mmd_loss_scale:
             loss_mmd = self.mmd_loss_fn(inputs=codes)
