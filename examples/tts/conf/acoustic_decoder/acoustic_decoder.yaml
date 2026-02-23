@@ -1,15 +1,11 @@
-# This config contains the default values for training an English 22.05kHz DiscreteSpeech model.
-# If you want to train a model on other dataset, you can change config values according to your dataset.
-# Most dataset-specific arguments are in the head of the config file, see below.
-
-name: DiscreteSpeech
+name: AcousticDecoder
 
 max_epochs: ???
 batch_size: ???
 
 feature_name: ???
-audio_codec_path: ???
-acoustic_decoder_path: ???
+audio_codec_name: null
+audio_codec_path: null
 
 train_ds_type: ???
 train_ds_meta: ???
@@ -32,39 +28,16 @@ semantic_codebook_dim: 6
 acoustic_codebook_num: 7
 acoustic_codebook_dim: 42
 
-context_min_len: 50
-context_max_len: 125
-
-num_duration: 15
-num_speaking_rate: 41
-
-fps_max: -1.2
-fps_min: -2.4
-
 feature_readers:
   audio_codec:
     _target_: nemo.collections.tts.parts.preprocessing.features.AudioCodecFeatureReader
     feature_filename: ${feature_name}
 
-context_hidden_dim: 512
-context_filters: 2048
-
-text_hidden_dim: 1024
-text_filters: 4096
-
-duration_hidden_dim: 384
-duration_filters: 1536
-
-audio_hidden_dim: 512
-audio_filters: 2048
+model_hidden_dim: 512
+model_filters: 2048
 
 model:
   inference_phoneme_probability: 1.0
-
-  context_min_len: ${context_min_len}
-  context_max_len: ${context_max_len}
-
-  max_token_duration: ${num_duration}
 
   semantic_codebook_num: ${semantic_codebook_num}
   semantic_codebook_dim: ${semantic_codebook_dim}
@@ -115,7 +88,6 @@ model:
         dataset_meta: ${train_ds_meta}
         feature_readers: ${feature_readers}
         batch_duration: ${batch_size}
-        pc_dropout_rate: 0.1
         min_words: 2
         min_duration: 1.0
         max_duration: 20.1
@@ -151,14 +123,12 @@ model:
     max_filename_len: 100
 
     generators:
-      - _target_: nemo.collections.tts.parts.utils.callbacks.DiscreteSpeechArtifactGenerator
+      - _target_: nemo.collections.tts.parts.utils.callbacks.AcousticDecoderArtifactGenerator
+        audio_codec_name: ${audio_codec_name}
         audio_codec_path: ${audio_codec_path}
-        acoustic_decoder_path: ${acoustic_decoder_path}
         log_audio: true
-        log_audio_gta: false
-        log_alignment: false
+        log_semantic: true
         num_audio_iters: 10
-        num_duration_iters: 10
 
     dataset:
       dataset_type: default
@@ -172,110 +142,47 @@ model:
       pin_memory: true
       persistent_workers: true
 
-  aligner:
-    _target_: nemo.collections.tts.modules.acoustic_decoder_modules.Aligner
-    text_emb_dim: 256
-    alignment_encoder:
-      _target_: nemo.collections.tts.modules.aligner.AlignmentEncoder
-      n_mel_channels: ${codebook_dim}
-      n_text_channels: 256
-      dist_type: cosine
-      temperature: 20.0
-      n_att_channels: 128
-      n_mel_filters: 256
-
-  context_encoder:
-    _target_: nemo.collections.tts.modules.discrete_speech_modules.ContextEmbeddingEncoder
-    input_dim: ${codebook_dim}
-    rnn_layers: 2
-    rnn_dim: 512
-    encoder:
-      _target_: nemo.collections.tts.modules.acoustic_decoder_transformer.ContextTransformer
-      n_layer: 6
-      n_head: 8
-      d_model: ${context_hidden_dim}
-      d_head: 64
-      d_inner: ${context_filters}
-      kernel_size: 7
-
-  text_encoder:
-    _target_: nemo.collections.tts.modules.discrete_speech_transformer.TextEncoder
-    n_layer: 8
-    n_head: 12
-    d_model: ${text_hidden_dim}
-    d_context: ${context_hidden_dim}
-    d_head: 64
-    d_inner: ${text_filters}
-    kernel_size: 1
+  semantic_layer:
+    _target_: nemo.collections.tts.modules.acoustic_decoder_modules.SemanticInputLayer
+    input_dim: ${semantic_codebook_dim}
+    output_dim: ${model_hidden_dim}
 
   encoder:
-    _target_: nemo.collections.tts.modules.discrete_speech_transformer.AudioEncoder
-    input_dim: ${text_hidden_dim}
+    _target_: nemo.collections.tts.modules.acoustic_decoder_transformer.AudioEncoder
+    input_dim: ${model_hidden_dim}
     transformer:
-      _target_: nemo.collections.tts.modules.discrete_speech_transformer.AudioTransformer
+      _target_: nemo.collections.tts.modules.acoustic_decoder_transformer.AudioTransformer
       n_layer: 12
       n_head_self: 8
-      n_head_context: 8
-      d_model: ${audio_hidden_dim}
-      d_context: ${context_hidden_dim}
-      d_inner: ${audio_filters}
+      n_head_text: 1
+      d_model: ${model_hidden_dim}
+      d_inner: ${model_filters}
       d_head: 64
       kernel_size: 7
 
   decoder:
-    _target_: nemo.collections.tts.modules.discrete_speech_modules.AudioDecoder
-    num_codebooks: ${semantic_codebook_num}
+    _target_: nemo.collections.tts.modules.acoustic_decoder_modules.AudioDecoder
+    num_codebooks: ${acoustic_codebook_num}
     codebook_size: ${codebook_size}
-    codebook_dim: ${semantic_codebook_dim}
+    codebook_dim: ${acoustic_codebook_dim}
     fft:
-      _target_: nemo.collections.tts.modules.discrete_speech_transformer.AudioTransformer
+      _target_: nemo.collections.tts.modules.acoustic_decoder_transformer.AudioTransformer
       n_layer: 6
       n_head_self: 8
-      n_head_context: 8
-      d_model: ${audio_hidden_dim}
-      d_context: ${context_hidden_dim}
-      d_inner: ${audio_filters}
+      n_head_text: 1
+      d_model: ${model_hidden_dim}
+      d_inner: ${model_filters}
       d_head: 64
       kernel_size: 7
 
-  duration_encoder:
-    _target_: nemo.collections.tts.modules.discrete_speech_transformer.DurationEncoder
-    input_dim: ${text_hidden_dim}
-    transformer:
-      _target_: nemo.collections.tts.modules.discrete_speech_transformer.DurationTransformer
-      n_layer: 6
-      n_head_self: 8
-      n_head_context: 8
-      d_model: ${duration_hidden_dim}
-      d_context: ${context_hidden_dim}
-      d_inner: ${duration_filters}
-      d_head: 64
-      kernel_size: 7
-
-  duration_decoder:
-    _target_: nemo.collections.tts.modules.discrete_speech_modules.DurationDecoder
-    num_duration: ${num_duration}
-    fft:
-      _target_: nemo.collections.tts.modules.discrete_speech_transformer.DurationTransformer
-      n_layer: 6
-      n_head_self: 8
-      n_head_context: 8
-      d_model: ${duration_hidden_dim}
-      d_context: ${context_hidden_dim}
-      d_inner: ${duration_filters}
-      d_head: 64
-      kernel_size: 7
-
-  speaking_rate_predictor:
-    _target_: nemo.collections.tts.modules.discrete_speech_modules.SpeakingRatePredictor
-    num_speaking_rate: ${num_speaking_rate}
-    context_dim: ${context_hidden_dim}
-
-  speaking_rate_quantizer:
-    _target_: nemo.collections.tts.modules.discrete_speech_modules.SpeakingRateQuantizer
-    num_bins: ${num_speaking_rate}
-    min_value: ${fps_min}
-    max_value: ${fps_max}
+  text_encoder:
+    _target_: nemo.collections.tts.modules.acoustic_decoder_transformer.TextEncoder
+    n_layer: 6
+    n_head: 8
+    d_model: ${model_hidden_dim}
+    d_head: 64
+    d_inner: ${model_filters}
+    kernel_size: 7
 
   optim:
     name: adamw
