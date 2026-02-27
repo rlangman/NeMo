@@ -18,6 +18,7 @@ import torch.nn as nn
 
 from einops import rearrange
 from nemo.collections.tts.modules.transformer import PositionalEmbedding
+from nemo.collections.tts.modules.acoustic_decoder_modules import TextDownSampling
 from nemo.collections.tts.modules.acoustic_decoder_transformer import TransformerLayer, TransformerCrossAttentionLayer
 from nemo.collections.tts.parts.utils.helpers import get_mask_from_lengths
 from nemo.core.classes import NeuralModule, typecheck
@@ -37,9 +38,13 @@ class TextEncoder(NeuralModule):
         d_inner,
         kernel_size,
         padding_idx,
+        down_sample_rate,
+        bos_id,
+        eos_id,
+        space_id,
+        space_dur,
         dropout=0.1,
         dropout_att=0.1,
-        down_sample_rate=3,
     ):
         super(TextEncoder, self).__init__()
         self.d_model = d_model
@@ -59,12 +64,17 @@ class TextEncoder(NeuralModule):
             )
             for _ in range(n_layer)
         ])
-        self.down_sample_rate = down_sample_rate
-        down_sample_kernel_size = 2 * self.down_sample_rate - 1
-        padding = down_sample_kernel_size // 2
-        self.downsample_layer = nn.Conv1d(
-            in_channels=d_model, out_channels=d_model, kernel_size=down_sample_kernel_size, stride=self.down_sample_rate, padding=padding,
-        )
+        if down_sample_rate and down_sample_rate > 1:
+            self.downsample_layer = TextDownSampling(
+                input_dim=d_model,
+                down_sample_rate=down_sample_rate,
+                bos_id=bos_id,
+                eos_id=eos_id,
+                space_id=space_id,
+                space_dur=space_dur,
+            )
+        else:
+            self.downsample_layer = None
 
     @property
     def input_types(self):
@@ -95,12 +105,14 @@ class TextEncoder(NeuralModule):
         for layer in self.text_layers:
             out = layer(out, mask=text_mask)
 
-        out_lens = torch.ceil(text_lens / self.down_sample_rate).int()
-        out_mask = get_mask_from_lengths(out_lens)
+        if self.downsample_layer is not None:
+            out = rearrange(out, 'B T D -> B D T')
+            out, out_lens = self.downsample_layer(text=text, text_emb=out, text_lens=text_lens)
+            out = rearrange(out, 'B D T -> B T D')
+        else:
+            out_lens = text_lens
 
-        out = rearrange(out, 'B T D -> B D T')
-        out = self.downsample_layer(out)
-        out = rearrange(out, 'B D T -> B T D')
+        out_mask = get_mask_from_lengths(out_lens)
 
         context_emb = rearrange(context_emb, 'B D -> B 1 D')
         context_res = self.context_cond_layer(context_emb)

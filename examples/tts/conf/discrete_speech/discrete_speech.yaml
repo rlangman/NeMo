@@ -57,6 +57,7 @@ audio_filters: 2048
 
 model:
   text_down_sample_rate: 3
+  space_dur: 5
   inference_phoneme_probability: 1.0
 
   context_min_len: ${context_min_len}
@@ -114,7 +115,6 @@ model:
     dataloader_params:
       batch_size: 1
       num_workers: 4
-      pin_memory: true
       persistent_workers: true
 
   validation_ds:
@@ -130,8 +130,6 @@ model:
     dataloader_params:
       batch_size: 8
       num_workers: 1
-      pin_memory: true
-      persistent_workers: true
 
   log_config:
     log_dir: ${log_dir}
@@ -150,6 +148,8 @@ model:
         log_alignment: false
         num_audio_iters: 20
         num_duration_iters: 10
+        silence_pad_start: 5
+        silence_pad_end: 5
 
     dataset:
       dataset_type: default
@@ -160,8 +160,6 @@ model:
     dataloader_params:
       batch_size: 8
       num_workers: 1
-      pin_memory: true
-      persistent_workers: true
 
   aligner:
     _target_: nemo.collections.tts.modules.acoustic_decoder_modules.Aligner
