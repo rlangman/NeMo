@@ -68,8 +68,10 @@ class DiscreteSpeechModel(ModelPT):
         num_text_embed = len(self.text_tokenizer.tokens)
         self.text_pad_token = self.text_tokenizer.pad
         self.space_token = self.text_tokenizer.space
+        self.bos_token = self.text_tokenizer.bos
+        self.eos_token = self.text_tokenizer.eos
 
-        # Maximum duration of a single biphone
+        # Maximum duration of a single multiphone
         self.max_token_duration = cfg.get("max_token_duration")
 
         # Context length in terms of number of audio tokens
@@ -85,8 +87,20 @@ class DiscreteSpeechModel(ModelPT):
 
         self.speaking_rate_quantizer = instantiate(cfg.speaking_rate_quantizer)
 
+        self.text_down_sample_rate = cfg.get("text_down_sample_rate")
+        self.space_dur = cfg.get("space_dur", 1)
+
         # Encoder, decoder definitions
-        self.text_encoder = instantiate(cfg.text_encoder, n_embed=num_text_embed, padding_idx=self.text_pad_token)
+        self.text_encoder = instantiate(
+            cfg.text_encoder,
+            n_embed=num_text_embed,
+            padding_idx=self.text_pad_token,
+            down_sample_rate=self.text_down_sample_rate,
+            bos_id=self.bos_token,
+            eos_id=self.eos_token,
+            space_id=self.space_token,
+            space_dur=self.space_dur,
+        )
         self.encoder = instantiate(cfg.encoder)
         self.decoder = instantiate(cfg.decoder)
         self.duration_encoder = instantiate(cfg.duration_encoder)
@@ -101,15 +115,21 @@ class DiscreteSpeechModel(ModelPT):
         else:
             self.context_aligner_encoder = None
 
-        self.text_down_sample_rate = cfg.get("text_down_sample_rate", 3)
-
             # Aligner definition
         self.phoneme_aligner = instantiate(cfg.aligner, num_text_emb=num_text_embed)
 
         if self.text_down_sample_rate == 1:
             self.multiphone_aligner = self.phoneme_aligner
         elif self.text_down_sample_rate > 1:
-            self.multiphone_aligner = instantiate(cfg.aligner, num_text_emb=num_text_embed, down_sample_rate=self.text_down_sample_rate)
+            self.multiphone_aligner = instantiate(
+                cfg.aligner,
+                num_text_emb=num_text_embed,
+                down_sample_rate=self.text_down_sample_rate,
+                bos_id=self.bos_token,
+                eos_id=self.eos_token,
+                space_id=self.space_token,
+                space_dur=self.space_dur,
+            )
         else:
             raise ValueError(f"text_down_sample_rate must be >= 1")
 
@@ -876,10 +896,10 @@ class DiscreteSpeechModel(ModelPT):
         ctc_loss = self.forward_sum_loss_fn(attn_logprob=align_logits, in_lens=text_lens, out_lens=audio_token_lens)
         train_ctc_loss = self.aligner_ctc_loss_scale * ctc_loss
 
-        ctc_biphone_loss = self.forward_sum_loss_fn(
+        ctc_multiphone_loss = self.forward_sum_loss_fn(
             attn_logprob=balign_logits, in_lens=dur_lens, out_lens=audio_token_sample_lens
         )
-        train_ctc_biphone_loss = self.aligner_ctc_loss_scale * ctc_biphone_loss
+        train_ctc_multiphone_loss = self.aligner_ctc_loss_scale * ctc_multiphone_loss
 
         if self.current_epoch < self.bin_loss_start_epoch:
             bin_loss_weight = 0.0
@@ -891,12 +911,12 @@ class DiscreteSpeechModel(ModelPT):
         bin_loss = self.bin_loss_fn(hard_attention=align_hard, soft_attention=align_soft)
         train_bin_loss = bin_loss_weight * self.aligner_bin_loss_scale * bin_loss
 
-        bin_biphone_loss = self.bin_loss_fn(hard_attention=balign_hard, soft_attention=balign_soft)
-        train_bin_biphone_loss = bin_loss_weight * self.aligner_bin_loss_scale * bin_biphone_loss
+        bin_multiphone_loss = self.bin_loss_fn(hard_attention=balign_hard, soft_attention=balign_soft)
+        train_bin_multiphone_loss = bin_loss_weight * self.aligner_bin_loss_scale * bin_multiphone_loss
 
         loss = train_semantic_token_loss + train_semantic_token_post_loss + \
                train_dur_loss + train_dur_post_loss + train_speaking_rate_loss + train_ctc_loss + train_bin_loss + \
-               train_ctc_biphone_loss + train_bin_biphone_loss
+               train_ctc_multiphone_loss + train_bin_multiphone_loss
 
         metrics = {
             "t_semantic_token_loss": semantic_token_loss,
@@ -905,9 +925,9 @@ class DiscreteSpeechModel(ModelPT):
             "t_duration_post_loss": duration_post_loss,
             "t_speaking_rate_loss": speaking_rate_loss,
             "t_ctc_loss": ctc_loss,
-            "t_ctc_biphone_loss": ctc_biphone_loss,
+            "t_ctc_multiphone_loss": ctc_multiphone_loss,
             "t_bin_loss": bin_loss,
-            "t_bin_biphone_loss": bin_biphone_loss,
+            "t_bin_multiphone_loss": bin_multiphone_loss,
         }
         self.log_dict(metrics, on_step=True, sync_dist=True)
         self.log("t_loss", semantic_token_loss, prog_bar=True, logger=False, sync_dist=True)
@@ -1144,7 +1164,16 @@ class DiscreteSpeechModel(ModelPT):
 
 
     def _duration_infer(
-        self, inputs, text_lens, context, context_mask, num_iters, temperature=None, topk=None
+        self,
+        inputs,
+        text_lens,
+        context,
+        context_mask,
+        num_iters,
+        temperature=None,
+        topk=None,
+        silence_pad_start=None,
+        silence_pad_end=None,
     ):
         # [B, T]
         text_mask = get_mask_from_lengths(text_lens)
@@ -1156,6 +1185,17 @@ class DiscreteSpeechModel(ModelPT):
 
         duration_maskin = torch.zeros_like(text_mask, dtype=torch.bool)
         dur_indices = torch.zeros_like(text_mask, dtype=torch.int)
+
+        if silence_pad_start:
+            for i in range(dur_indices.shape[0]):
+                dur_indices[i, 0] = silence_pad_start - 1
+                duration_maskin[i, 0] = True
+
+        if silence_pad_end:
+            for i in range(dur_indices.shape[0]):
+                last_i = text_lens[i] - 1
+                dur_indices[i, last_i] = silence_pad_end - 1
+                duration_maskin[i, last_i] = True
 
         for i in range(num_iters):
             if i == 0:
@@ -1344,7 +1384,7 @@ class DiscreteSpeechModel(ModelPT):
         duration_temperature=None,
         speaking_rate=None,
         silence_pad_start=None,
-        silence_pad_end=5,
+        silence_pad_end=None,
         min_speaking_rate=-0.5,
         max_speaking_rate=0.5,
     ):
@@ -1373,15 +1413,9 @@ class DiscreteSpeechModel(ModelPT):
             num_iters=num_duration_iters,
             temperature=duration_temperature,
             topk=duration_topk,
+            silence_pad_start=silence_pad_start,
+            silence_pad_end=silence_pad_end,
         )
-
-        if silence_pad_start:
-            for i in range(durs.shape[0]):
-                durs[i, 0] = silence_pad_start
-
-        if silence_pad_end:
-            for i in range(durs.shape[0]):
-                durs[i, dur_lens[i] - 1] = silence_pad_end
 
         text_enc_repeated, semantic_lens = regulate_len(durs, text_enc, pace=1.0)
         semantic_mask = get_mask_from_lengths(semantic_lens)

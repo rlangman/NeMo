@@ -15,7 +15,7 @@
 import torch
 from einops import rearrange
 
-from nemo.collections.tts.parts.utils.helpers import binarize_attention_parallel, get_mask_from_lengths
+from nemo.collections.tts.parts.utils.helpers import binarize_attention_parallel, get_mask_from_lengths, regulate_len
 from nemo.collections.tts.parts.utils.tts_dataset_utils import beta_binomial_prior_distribution_torch
 from nemo.core.classes import NeuralModule, typecheck
 from nemo.core.neural_types.elements import (
@@ -235,19 +235,74 @@ class AudioDecoder(NeuralModule):
         return audio_tokens, audio_logits
 
 
+class TextDownSampling(NeuralModule):
+
+    def __init__(self, input_dim, down_sample_rate, bos_id, eos_id, space_id, space_dur):
+        super().__init__()
+        self.bos_id = bos_id
+        self.eos_id = eos_id
+        self.space_id = space_id
+        self.space_dur = space_dur
+        self.down_sample_rate = down_sample_rate
+        kernel_size = 2 * self.down_sample_rate - 1
+        self.downsample_layer = Conv1d(
+            in_channels=input_dim, out_channels=input_dim, kernel_size=kernel_size, stride=self.down_sample_rate,
+        )
+
+    @typecheck(
+        input_types={
+            "text": NeuralType(('B', 'T'), EncodedRepresentation()),
+            "text_emb": NeuralType(('B', 'D', 'T'), EncodedRepresentation()),
+            "text_lens": NeuralType(tuple('B'), LengthsType()),
+        },
+        output_types={
+            "outputs": NeuralType(('B', 'D', 'T'), EncodedRepresentation()),
+            "output_lens": NeuralType(tuple('B'), LengthsType()),
+        }
+    )
+    def forward(self, text, text_emb, text_lens):
+        text_mask = get_mask_from_lengths(text_lens)
+        is_bos_eos = torch.logical_or(text == self.bos_id, text == self.eos_id)
+        is_space = text == self.space_id
+        text_durs = torch.where(is_bos_eos, self.down_sample_rate * torch.ones_like(text), torch.ones_like(text))
+        text_durs = torch.where(is_space, self.space_dur * torch.ones_like(text), text_durs)
+        text_durs = text_durs * text_mask
+        text_emb = rearrange(text_emb, 'B D T -> B T D')
+        text_emb_repeated, output_lens = regulate_len(durations=text_durs, enc_out=text_emb)
+        text_emb_repeated = rearrange(text_emb_repeated, 'B T D -> B D T')
+        output_lens = torch.ceil(output_lens / self.down_sample_rate).int()
+        out_mask = get_mask_from_lengths(output_lens)
+        outputs = self.downsample_layer(inputs=text_emb_repeated, mask=out_mask)
+        return outputs, output_lens
+
+
 class Aligner(NeuralModule):
 
-    def __init__(self, alignment_encoder, num_text_emb, text_emb_dim, down_sample_rate=None, prior_scaling_factor=0.2):
+    def __init__(
+        self,
+        alignment_encoder,
+        num_text_emb,
+        text_emb_dim,
+        prior_scaling_factor=0.2,
+        down_sample_rate=None,
+        space_id=None,
+        bos_id=None,
+        eos_id=None,
+        space_dur=None,
+    ):
         super().__init__()
         self.alignment_encoder = alignment_encoder
         self.text_emb = torch.nn.Embedding(num_text_emb, text_emb_dim)
-        self.down_sample_rate = down_sample_rate
         self.prior_scaling_factor = prior_scaling_factor
 
-        if self.down_sample_rate:
-            kernel_size = 2 * down_sample_rate - 1
-            self.downsample_layer = Conv1d(
-                in_channels=text_emb_dim, out_channels=text_emb_dim, kernel_size=kernel_size, stride=self.down_sample_rate,
+        if down_sample_rate and down_sample_rate > 1:
+            self.downsample_layer = TextDownSampling(
+                input_dim=text_emb_dim,
+                down_sample_rate=down_sample_rate,
+                bos_id=bos_id,
+                eos_id=eos_id,
+                space_id=space_id,
+                space_dur=space_dur
             )
         else:
             self.downsample_layer = None
@@ -292,10 +347,9 @@ class Aligner(NeuralModule):
         text_emb = text_emb * rearrange(text_mask, "B T -> B T 1")
         text_emb = rearrange(text_emb, "B T D -> B D T")
 
-        if self.down_sample_rate:
-            text_lens = torch.ceil(text_lens / self.down_sample_rate).int()
+        if self.downsample_layer is not None:
+            text_emb, text_lens = self.downsample_layer(text=text, text_emb=text_emb, text_lens=text_lens)
             text_mask = get_mask_from_lengths(text_lens)
-            text_emb = self.downsample_layer(inputs=text_emb, mask=text_mask)
 
         attn_mask = rearrange(audio_mask, "B T -> B 1 T 1") * rearrange(text_mask, "B T -> B 1 1 T")
         # Aligner requires an inverted mask
