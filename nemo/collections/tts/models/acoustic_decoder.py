@@ -24,16 +24,20 @@ from lightning.pytorch import Trainer
 
 from nemo.collections.tts.data.text_to_speech_dataset import create_text_to_speech_dataset
 from nemo.collections.tts.losses.acoustic_decoder_loss import AudioTokenLoss
+from nemo.collections.tts.losses.aligner_loss import BinLoss, ForwardSumLoss
 from nemo.collections.tts.parts.utils.callbacks import LoggingCallback
 from nemo.collections.tts.parts.utils.helpers import get_mask_from_lengths
 from nemo.collections.tts.parts.utils.tts_dataset_utils import stack_tensors
 from nemo.core import ModelPT
 from nemo.core.classes.common import PretrainedModelInfo, typecheck
 from nemo.core.neural_types.elements import (
+    EncodedRepresentation,
     FloatType,
     IntType,
     LengthsType,
     LogitsType,
+    LogprobsType,
+    ProbsType,
     TokenIndex,
 )
 from nemo.core.neural_types.neural_type import NeuralType
@@ -56,7 +60,15 @@ class AcousticDecoderModel(ModelPT):
 
         # Text tokenizer information
         num_text_embed = len(self.text_tokenizer.tokens)
+        self.pad_with_space = self.text_tokenizer.pad_with_space
         self.text_pad_token = self.text_tokenizer.pad
+        self.space_token = self.text_tokenizer.space
+
+        # Context length in terms of number of audio tokens
+        self.target_min_len = cfg.get("target_min_len", 10)
+        self.context_min_len = cfg.get("context_min_len", 25)
+        self.context_max_len = cfg.get("context_max_len", 125)
+        self.context_len_noise = cfg.get("context_len_noise", 5)
 
         # Quantizer definitions
         self.semantic_codebook_num = cfg.get("semantic_codebook_num")
@@ -70,7 +82,15 @@ class AcousticDecoderModel(ModelPT):
         self.text_encoder = instantiate(cfg.text_encoder, n_embed=num_text_embed, padding_idx=self.text_pad_token)
         self.encoder = instantiate(cfg.encoder)
         self.decoder = instantiate(cfg.decoder)
+        self.context_encoder = instantiate(cfg.context_encoder)
         self.semantic_layer = instantiate(cfg.semantic_layer)
+
+        if "context_aligner_encoder" in cfg:
+            self.context_aligner_encoder = instantiate(cfg.context_aligner_encoder)
+        else:
+            self.context_aligner_encoder = None
+
+        self.aligner = instantiate(cfg.aligner, num_text_emb=num_text_embed)
 
         # Infilling hyperparameters
         self.audio_infill_min = cfg.get("audio_infill_min", 0.05)
@@ -87,6 +107,14 @@ class AcousticDecoderModel(ModelPT):
         # Reconstruction losses
         self.audio_token_loss_scale = cfg.get("audio_token_loss_scale", 1.0)
         self.audio_token_loss_fn = AudioTokenLoss(num_codebooks=self.acoustic_codebook_num)
+
+        self.aligner_bin_loss_scale = cfg.get("aligner_bin_loss_scale", 0.01)
+        self.aligner_ctc_loss_scale = cfg.get("aligner_ctc_loss_scale", 0.01)
+        self.bin_loss_start_epoch = cfg.get("bin_loss_start_epoch", 0)
+        self.bin_loss_warmup_epochs = cfg.get("bin_loss_warmup_epochs", 10)
+
+        self.forward_sum_loss_fn = ForwardSumLoss()
+        self.bin_loss_fn = BinLoss()
 
         self.log_config = cfg.get("log_config", None)
 
@@ -142,6 +170,285 @@ class AcousticDecoderModel(ModelPT):
         audio_codes_noise = torch.where(noise_mask, noise, audio_codes)
         return audio_codes_noise
 
+    def _sample_lens(self, batch_size, audio_lens, random_sample, max_len=None):
+        if max_len is None:
+            max_len = self.context_max_len
+
+        # [B]
+        max_lens = torch.clamp_max(audio_lens, max=max_len)
+        min_lens = torch.clamp_max(max_lens, max=self.context_min_len)
+
+        sample_len_list = []
+        for i in range(batch_size):
+            if random_sample:
+                # Sample between minimum and maximum sample size
+                sample_len = torch.randint(low=min_lens[i], high=max_lens[i] + 1, size=[]).item()
+            else:
+                # Use maximum sample size
+                sample_len = max_lens[i].item()
+
+            sample_len_list.append(sample_len)
+
+        sample_lens = torch.tensor(sample_len_list, device=audio_lens.device)
+        return sample_lens
+
+    def _find_space_endings(self, text, durs, max_audio_len):
+        # [B, T_text]
+        cum_ends = torch.cumsum(durs, dim=1).long()
+        space_ends = torch.where(text == self.space_token, cum_ends, torch.zeros_like(cum_ends))
+        space_ends_invert = torch.where(
+            text == self.space_token,
+            cum_ends,
+            max_audio_len * torch.ones_like(cum_ends)
+        )
+        # [B, 1]
+        if self.pad_with_space:
+            min_space = space_ends_invert.topk(k=2, dim=1, largest=False).values[:, 1:2]
+            max_space = space_ends.topk(k=2, dim=1).values[:, 1:2]
+        else:
+            min_space = space_ends_invert.topk(k=1, dim=1, largest=False).values[:, :1]
+            max_space = space_ends.topk(k=1, dim=1).values[:, :1]
+
+        return space_ends, min_space, max_space
+
+    def _slice_context_information(
+        self,
+        text,
+        audio_tokens,
+        audio_codes,
+        batch_size,
+        context_starts,
+        context_ends,
+        context_lens,
+        text_starts,
+        text_ends,
+        target_text_lens,
+        audio_starts,
+        audio_ends,
+        target_audio_lens,
+    ):
+        context_list = []
+        target_text_list = []
+        target_audio_token_list = []
+        target_audio_code_list = []
+        for i in range(batch_size):
+            context_start_i = context_starts[i].item()
+            context_end_i = context_ends[i].item()
+            context_len_i = context_lens[i].item()
+            text_start_i = text_starts[i].item()
+            text_end_i = text_ends[i].item()
+            audio_start_i = audio_starts[i].item()
+            audio_end_i = audio_ends[i].item()
+
+            context_i = audio_codes[i, :, context_start_i:context_end_i]
+            if context_i.shape[1] < self.context_max_len:
+                num_repeats = int(math.ceil(self.context_max_len / context_len_i))
+                context_i = torch.tile(context_i, dims=(1, num_repeats))
+                context_i = context_i[:, :self.context_max_len]
+
+            text_i = text[i, text_start_i:text_end_i]
+
+            audio_tokens_i = audio_tokens[i, :, audio_start_i:audio_end_i]
+            audio_codes_i = audio_codes[i, :, audio_start_i:audio_end_i]
+
+            context_list.append(context_i)
+            target_text_list.append(text_i)
+            target_audio_token_list.append(audio_tokens_i)
+            target_audio_code_list.append(audio_codes_i)
+
+        context_codes = stack_tensors(tensors=context_list, max_lens=[self.context_max_len]).to(audio_codes.device)
+        context_output_lens = self.context_max_len * torch.ones_like(context_lens)
+
+        max_text_len = target_text_lens.max().item()
+        target_text = stack_tensors(tensors=target_text_list, max_lens=[max_text_len]).to(audio_codes.device)
+
+        max_audio_len = target_audio_lens.max().item()
+        target_audio_tokens = stack_tensors(tensors=target_audio_token_list, max_lens=[max_audio_len]).to(
+            audio_codes.device)
+        target_audio_codes = stack_tensors(tensors=target_audio_code_list, max_lens=[max_audio_len]).to(
+            audio_codes.device)
+
+        return context_codes, context_output_lens, target_text, target_audio_tokens, target_audio_codes
+
+    def sample_context_audio_start(self, audio_tokens, audio_codes, audio_lens, text, durs, text_lens, random_sample, max_len=None):
+        batch_size = audio_codes.shape[0]
+        max_audio_len = audio_tokens.shape[2]
+        # [B, 1]
+        context_ends = self._sample_lens(batch_size=batch_size, audio_lens=audio_lens, random_sample=random_sample, max_len=max_len)
+        context_ends = rearrange(context_ends, 'B -> B 1')
+        space_ends, min_space, max_space = self._find_space_endings(text=text, durs=durs, max_audio_len=max_audio_len)
+
+        # [B, T]
+        valid_space = torch.logical_and(space_ends >= min_space, space_ends <= max_space)
+        valid_space = torch.logical_and(valid_space, space_ends <= context_ends)
+        valid_space = torch.logical_or(valid_space, space_ends == min_space)
+        space_ends = torch.where(valid_space, space_ends, torch.zeros_like(space_ends))
+
+        # [B]
+        context_end_topk = space_ends.topk(k=1, dim=1)
+        context_lens = context_end_topk.values[:, 0]
+        target_audio_lens = audio_lens - context_lens
+
+        target_text_starts = context_end_topk.indices[:, 0] + torch.tensor(1)
+        target_text_lens = text_lens - target_text_starts
+
+        audio_starts = context_lens
+        target_audio_lens = torch.maximum(target_audio_lens, target_text_lens)
+
+        if self.context_len_noise and random_sample:
+            min_context_len = torch.clamp_max(input=context_lens, max=self.context_min_len)
+            context_len_noise = torch.randint_like(input=context_lens, low=0, high=self.context_len_noise + 1)
+            context_lens = context_lens - context_len_noise
+            context_lens = torch.maximum(input=context_lens, other=min_context_len)
+
+        zero_starts = torch.zeros(batch_size, dtype=torch.int32)
+        context_codes, context_lens, target_text, target_audio_tokens, target_audio_codes = \
+            self._slice_context_information(
+                text=text,
+                audio_tokens=audio_tokens,
+                audio_codes=audio_codes,
+                batch_size=batch_size,
+                context_starts=zero_starts,
+                context_ends=context_lens,
+                context_lens=context_lens,
+                text_starts=target_text_starts,
+                text_ends=text_lens,
+                target_text_lens=target_text_lens,
+                audio_starts=audio_starts,
+                audio_ends=audio_lens,
+                target_audio_lens=target_audio_lens,
+            )
+
+        return target_text, target_text_lens, target_audio_tokens, target_audio_codes, target_audio_lens, \
+               context_codes, context_lens
+
+    def sample_context_audio_end(self, audio_tokens, audio_codes, audio_lens, text, durs):
+        batch_size = audio_codes.shape[0]
+        max_audio_len = audio_tokens.shape[2]
+        # [B, 1]
+        context_rand_lens = self._sample_lens(batch_size=batch_size, audio_lens=audio_lens, random_sample=True)
+        context_starts = audio_lens - context_rand_lens
+        context_starts = rearrange(context_starts, 'B -> B 1')
+        space_ends, min_space, max_space = self._find_space_endings(text=text, durs=durs, max_audio_len=max_audio_len)
+
+        # [B, T]
+        valid_space = torch.logical_and(space_ends >= min_space, space_ends <= max_space)
+        valid_space = torch.logical_and(valid_space, space_ends >= context_starts)
+        valid_space = torch.logical_or(valid_space, space_ends == max_space)
+        space_ends = torch.where(valid_space, space_ends, max_audio_len * torch.ones_like(space_ends))
+
+        # [B]
+        context_start_topk = space_ends.topk(k=1, dim=1, largest=False)
+        target_audio_lens = context_start_topk.values[:, 0]
+        context_lens = audio_lens - target_audio_lens
+        target_text_lens = context_start_topk.indices[:, 0] + torch.tensor(1)
+
+        target_audio_lens = torch.maximum(target_audio_lens, target_text_lens)
+
+        if self.context_len_noise:
+            min_context_len = torch.clamp_max(input=context_lens, max=self.context_min_len)
+            context_len_noise = torch.randint_like(input=context_lens, low=0, high=self.context_len_noise + 1)
+            context_lens = context_lens - context_len_noise
+            context_lens = torch.maximum(input=context_lens, other=min_context_len)
+            context_starts = audio_lens - context_lens
+
+        zero_starts = torch.zeros(batch_size, dtype=torch.int32)
+        context_codes, context_lens, target_text, target_audio_tokens, target_audio_codes = \
+            self._slice_context_information(
+                text=text,
+                audio_tokens=audio_tokens,
+                audio_codes=audio_codes,
+                batch_size=batch_size,
+                context_starts=context_starts,
+                context_ends=audio_lens,
+                context_lens=context_lens,
+                text_starts=zero_starts,
+                text_ends=target_text_lens,
+                target_text_lens=target_text_lens,
+                audio_starts=zero_starts,
+                audio_ends=target_audio_lens,
+                target_audio_lens=target_audio_lens,
+            )
+
+        return target_text, target_text_lens, target_audio_tokens, target_audio_codes, target_audio_lens, \
+               context_codes, context_lens
+
+    def _concat_tensors(self, inputs1, inputs2, pad_value=0.0):
+        len1 = inputs1.shape[-1]
+        len2 = inputs2.shape[-1]
+        padding1 = max(len2 - len1, 0)
+        padding2 = max(len1 - len2, 0)
+        out1 = torch.nn.functional.pad(inputs1, pad=[0, padding1], value=pad_value)
+        out2 = torch.nn.functional.pad(inputs2, pad=[0, padding2], value=pad_value)
+        out = torch.cat([out1, out2], dim=0)
+        return out
+
+    def sample_context_audio_batch(self, audio_tokens, audio_codes, audio_lens, text, text_lens, durs):
+        half_batch_size = audio_tokens.shape[0] // 2
+        text_sample1, text_sample_lens1, audio_token_sample1, \
+        audio_codes_sample1, audio_token_sample_lens1, context_codes1, context_lens1 = self.sample_context_audio_start(
+            audio_tokens=audio_tokens[:half_batch_size],
+            audio_codes=audio_codes[:half_batch_size],
+            audio_lens=audio_lens[:half_batch_size],
+            text=text[:half_batch_size],
+            text_lens=text_lens[:half_batch_size],
+            durs=durs[:half_batch_size],
+            random_sample=True
+        )
+        text_sample2, text_sample_lens2, audio_token_sample2, \
+        audio_codes_sample2, audio_token_sample_lens2, context_codes2, context_lens2 = self.sample_context_audio_end(
+            audio_tokens=audio_tokens[half_batch_size:],
+            audio_codes=audio_codes[half_batch_size:],
+            audio_lens=audio_lens[half_batch_size:],
+            text=text[half_batch_size:],
+            durs=durs[half_batch_size:],
+        )
+        text_sample = self._concat_tensors(text_sample1, text_sample2, pad_value=self.text_pad_token)
+        text_sample_lens = torch.cat([text_sample_lens1, text_sample_lens2], dim=0)
+        audio_token_sample = self._concat_tensors(audio_token_sample1, audio_token_sample2)
+        audio_codes_sample = self._concat_tensors(audio_codes_sample1, audio_codes_sample2)
+        audio_token_sample_lens = torch.cat([audio_token_sample_lens1, audio_token_sample_lens2], dim=0)
+        context_codes = self._concat_tensors(context_codes1, context_codes2)
+        context_lens = torch.cat([context_lens1, context_lens2], dim=0)
+
+        return text_sample, text_sample_lens, audio_token_sample, \
+               audio_codes_sample, audio_token_sample_lens, context_codes, context_lens
+
+    def get_context(self, audio_tokens, audio_lens, max_len=None):
+        if max_len is None:
+            max_len = self.context_max_len
+
+        batch_size = audio_tokens.shape[0]
+        context_lens = torch.clamp_max(audio_lens, max=max_len)
+        context_list = []
+        context_len_list = []
+        for i in range(batch_size):
+            context_len_i = context_lens[i]
+            context_i = audio_tokens[i, :, :context_len_i]
+
+            if context_i.shape[1] < self.context_max_len:
+                num_repeats = int(math.ceil(self.context_max_len / context_len_i))
+                context_i = torch.tile(context_i, dims=(1, num_repeats))
+                context_i = context_i[:, :self.context_max_len]
+                context_len_i = self.context_max_len
+
+            context_list.append(context_i)
+            context_len_list.append(context_len_i)
+
+        context_lens = self.context_max_len * torch.ones_like(context_lens)
+        max_context_len = max(context_len_list)
+        context_tokens = stack_tensors(tensors=context_list, max_lens=[max_context_len]).to(audio_tokens.device)
+
+        context_tokens_rearrange = rearrange(context_tokens, 'B C T -> C B T')
+        # [batch_size, code_dim, audio_token_len]
+        context_codes = self.vector_quantizer.decode(indices=context_tokens_rearrange, input_len=context_lens)
+
+        context = self.context_encoder(
+            audio_codes=context_codes,
+            audio_lens=context_lens,
+        )
+        return context, context_lens
+
     @typecheck(
         input_types={
             "audio_tokens": NeuralType(('B', 'C', 'T_audio'), TokenIndex()),
@@ -150,10 +457,15 @@ class AcousticDecoderModel(ModelPT):
             "text_lens": NeuralType(tuple('B'), LengthsType()),
         },
         output_types={
+            "audio_token_sample": NeuralType(('B', 'C', 'T_audio'), TokenIndex()),
+            "audio_token_sample_lens": NeuralType(tuple('B'), LengthsType()),
             "audio_tokens_pred": NeuralType(('B', 'C', 'T_audio'), TokenIndex()),
             "audio_logits": NeuralType(('B', 'C', 'W', 'T_audio'), LogitsType()),
             "audio_tokens_pred_post": NeuralType(('B', 'C', 'T_audio'), TokenIndex()),
             "audio_logits_post": NeuralType(('B', 'C', 'W', 'T_audio'), LogitsType()),
+            "align_hard": NeuralType(('B', 'S', 'T_audio', 'T_text'), ProbsType()),
+            "align_soft": NeuralType(('B', 'S', 'T_audio', 'T_text'), ProbsType()),
+            "align_logits": NeuralType(('B', 'S', 'T_audio', 'T_text'), LogprobsType()),
         }
     )
     def forward(self, audio_tokens, audio_token_lens, text, text_lens):
@@ -161,36 +473,80 @@ class AcousticDecoderModel(ModelPT):
         # [batch_size, code_dim, audio_token_len]
         audio_codes = self.vector_quantizer.decode(indices=audio_tokens_rearrange, input_len=audio_token_lens).detach()
 
-        text_mask = get_mask_from_lengths(text_lens)
-        text_enc = self.text_encoder(text=text, text_mask=text_mask)
+        if self.context_aligner_encoder is not None:
+            context_aligner_emb = self.context_aligner_encoder(audio_codes=audio_codes, audio_lens=audio_token_lens)
+        else:
+            context_aligner_emb = None
+
+        # [batch_size, text_len], [batch_size, audio_token_len, text_len], ...
+        durs, _, align_hard, align_soft, align_logits = self.aligner(
+            text=text,
+            text_lens=text_lens,
+            audio_codes=audio_codes,
+            audio_lens=audio_token_lens,
+            context_emb=context_aligner_emb,
+        )
+
+        if self.training:
+            text_sample, text_sample_lens, audio_token_sample, \
+            audio_codes_sample, audio_token_sample_lens, context_codes, context_lens = self.sample_context_audio_batch(
+                audio_tokens=audio_tokens,
+                audio_codes=audio_codes,
+                audio_lens=audio_token_lens,
+                text=text,
+                text_lens=text_lens,
+                durs=durs,
+            )
+        else:
+            text_sample, text_sample_lens, audio_token_sample, \
+            audio_codes_sample, audio_token_sample_lens, context_codes, context_lens = self.sample_context_audio_start(
+                audio_tokens=audio_tokens,
+                audio_codes=audio_codes,
+                audio_lens=audio_token_lens,
+                text=text,
+                text_lens=text_lens,
+                durs=durs,
+                random_sample=False
+            )
+
+        text_mask = get_mask_from_lengths(text_sample_lens)
+        text_enc = self.text_encoder(text=text_sample, text_mask=text_mask)
+        context = self.context_encoder(audio_codes=context_codes, audio_lens=context_lens)
 
         if self.training:
             audio_maskin, _ = self.create_infill_mask(
-                input_lens=audio_token_lens,
+                input_lens=audio_token_sample_lens,
                 dist=self.audio_infill_dist,
                 infill_min=self.audio_infill_min,
                 infill_max=self.audio_infill_max,
             )
-            audio_mask = get_mask_from_lengths(audio_token_lens)
-            audio_codes_noise = self._add_audio_noise(audio_codes=audio_codes, mask=audio_mask).detach()
+            audio_mask = get_mask_from_lengths(audio_token_sample_lens)
+            audio_codes_noise = self._add_audio_noise(audio_codes=audio_codes_sample, mask=audio_mask).detach()
         else:
-            audio_mask = get_mask_from_lengths(audio_token_lens)
+            audio_mask = get_mask_from_lengths(audio_token_sample_lens)
             audio_maskin = torch.zeros(
-                [audio_codes.shape[0], audio_codes.shape[2]], dtype=torch.bool, device=audio_tokens.device
+                [audio_codes_sample.shape[0], audio_codes_sample.shape[2]], dtype=torch.bool, device=audio_tokens.device
             )
             # Unmask every 10th element
             audio_maskin[:, ::10] = True
             audio_maskin = audio_maskin * audio_mask
-            audio_codes_noise = audio_codes
+            audio_codes_noise = audio_codes_sample
 
-        semantic_codes = audio_codes[:, :self.semantic_codebook_dim, :]
+        audio_token_sample = audio_token_sample[:, self.semantic_codebook_num:, :]
+        semantic_codes = audio_codes_sample[:, :self.semantic_codebook_dim, :]
         audio_codes = audio_codes_noise[:, self.semantic_codebook_dim:, :]
+
+        # [batch_size, context_len]
+        context_mask = get_mask_from_lengths(context_lens)
+        context = rearrange(context, 'B D T -> B T D')
 
         semantic_codes = rearrange(semantic_codes, 'B C T -> B T C')
         encoder_input = self.semantic_layer(semantic_codes=semantic_codes, audio_mask=audio_mask)
         encoded = self.encoder(
             inputs=encoder_input,
             audio_mask=audio_mask,
+            context=context,
+            context_mask=context_mask,
             text_enc=text_enc,
             text_mask=text_mask,
         )
@@ -200,6 +556,8 @@ class AcousticDecoderModel(ModelPT):
         audio_tokens_pred_post, audio_logits_post = self.decoder(
             inputs=encoded,
             audio_mask=audio_mask,
+            context=context,
+            context_mask=context_mask,
             text_enc=text_enc,
             text_mask=text_mask,
             audio_codes=audio_codes,
@@ -207,10 +565,15 @@ class AcousticDecoderModel(ModelPT):
         )
 
         return (
+            audio_token_sample,
+            audio_token_sample_lens,
             audio_tokens_pred,
             audio_logits,
             audio_tokens_pred_post,
             audio_logits_post,
+            align_hard,
+            align_soft,
+            align_logits,
         )
 
     def training_step(self, batch_dict, batch_idx):
@@ -220,29 +583,48 @@ class AcousticDecoderModel(ModelPT):
         audio_token_lens = batch_dict.get("audio_token_lens")
 
         (
+            audio_token_sample,
+            audio_token_sample_lens,
             _,
             audio_token_logits,
             _,
             audio_token_logits_post,
+            align_hard,
+            align_soft,
+            align_logits,
         ) = self(audio_tokens=audio_tokens, audio_token_lens=audio_token_lens, text=text, text_lens=text_lens)
 
-        audio_mask = get_mask_from_lengths(audio_token_lens)
-        acoustic_tokens = audio_tokens[:, self.semantic_codebook_num:, :]
+        audio_mask = get_mask_from_lengths(audio_token_sample_lens)
 
         audio_token_loss = self.audio_token_loss_fn(
-            logits=audio_token_logits, target_tokens=acoustic_tokens, mask=audio_mask
+            logits=audio_token_logits, target_tokens=audio_token_sample, mask=audio_mask
         )
         train_audio_token_loss = self.audio_token_loss_scale * audio_token_loss
 
         audio_token_post_loss = self.audio_token_loss_fn(
-            logits=audio_token_logits_post, target_tokens=acoustic_tokens, mask=audio_mask
+            logits=audio_token_logits_post, target_tokens=audio_token_sample, mask=audio_mask
         )
         train_audio_token_post_loss = self.audio_token_loss_scale * audio_token_post_loss
 
-        loss = train_audio_token_loss + train_audio_token_post_loss
+        ctc_loss = self.forward_sum_loss_fn(attn_logprob=align_logits, in_lens=text_lens, out_lens=audio_token_lens)
+        train_ctc_loss = self.aligner_ctc_loss_scale * ctc_loss
+
+        if self.current_epoch < self.bin_loss_start_epoch:
+            bin_loss_weight = 0.0
+        elif self.current_epoch >= self.bin_loss_warmup_epochs:
+            bin_loss_weight = 1.0
+        else:
+            bin_loss_weight = (self.current_epoch - self.bin_loss_start_epoch) / (self.bin_loss_warmup_epochs - self.bin_loss_start_epoch)
+
+        bin_loss = self.bin_loss_fn(hard_attention=align_hard, soft_attention=align_soft)
+        train_bin_loss = bin_loss_weight * self.aligner_bin_loss_scale * bin_loss
+
+        loss = train_audio_token_loss + train_audio_token_post_loss + train_ctc_loss + train_bin_loss
         metrics = {
             "t_audio_token_loss": audio_token_loss,
             "t_audio_token_post_loss": audio_token_post_loss,
+            "t_ctc_loss": ctc_loss,
+            "t_bin_loss": bin_loss,
         }
         self.log_dict(metrics, on_step=True, sync_dist=True)
         self.log("t_loss", audio_token_loss, prog_bar=True, logger=False, sync_dist=True)
@@ -256,26 +638,30 @@ class AcousticDecoderModel(ModelPT):
         audio_token_lens = batch_dict.get("audio_token_lens")
 
         (
+            audio_token_sample,
+            audio_token_sample_lens,
             audio_tokens_pred,
             audio_token_logits,
             audio_tokens_pred_post,
             audio_token_logits_post,
+            _,
+            _,
+            _,
         ) = self(audio_tokens=audio_tokens, audio_token_lens=audio_token_lens, text=text, text_lens=text_lens)
 
-        audio_mask = get_mask_from_lengths(audio_token_lens)
-        acoustic_tokens = audio_tokens[:, self.semantic_codebook_num:, :]
-        num_audio_tokens = max(1, audio_token_lens.sum() * self.acoustic_codebook_num)
+        audio_mask = get_mask_from_lengths(audio_token_sample_lens)
+        num_audio_tokens = max(1, audio_token_sample_lens.sum() * self.acoustic_codebook_num)
 
         audio_token_loss = self.audio_token_loss_fn(
-            logits=audio_token_logits, target_tokens=acoustic_tokens, mask=audio_mask
+            logits=audio_token_logits, target_tokens=audio_token_sample, mask=audio_mask
         )
-        audio_token_correct = (acoustic_tokens == audio_tokens_pred) * rearrange(audio_mask, 'B T -> B 1 T')
+        audio_token_correct = (audio_token_sample == audio_tokens_pred) * rearrange(audio_mask, 'B T -> B 1 T')
         audio_token_accuracy = audio_token_correct.sum() / num_audio_tokens
 
         audio_token_post_loss = self.audio_token_loss_fn(
-            logits=audio_token_logits_post, target_tokens=acoustic_tokens, mask=audio_mask
+            logits=audio_token_logits_post, target_tokens=audio_token_sample, mask=audio_mask
         )
-        audio_token_correct_post = (acoustic_tokens == audio_tokens_pred_post) * rearrange(audio_mask, 'B T -> B 1 T')
+        audio_token_correct_post = (audio_token_sample == audio_tokens_pred_post) * rearrange(audio_mask, 'B T -> B 1 T')
         audio_token_post_accuracy = audio_token_correct_post.sum() / num_audio_tokens
 
         metrics = {
@@ -359,6 +745,8 @@ class AcousticDecoderModel(ModelPT):
         self,
         inputs,
         audio_lens,
+        context,
+        context_mask,
         text_enc,
         text_mask,
         num_iters,
@@ -394,6 +782,8 @@ class AcousticDecoderModel(ModelPT):
                 audio_tokens_i, audio_logits = self.decoder(
                     inputs=inputs,
                     audio_mask=audio_mask,
+                    context=context,
+                    context_mask=context_mask,
                     text_enc=text_enc,
                     text_mask=text_mask,
                     audio_codes=audio_codes,
@@ -427,6 +817,8 @@ class AcousticDecoderModel(ModelPT):
             audio_tokens, _ = self.decoder(
                 inputs=inputs,
                 audio_mask=audio_mask,
+                context=context,
+                context_mask=context_mask,
                 text_enc=text_enc,
                 text_mask=text_mask,
                 audio_codes=audio_codes,
@@ -446,6 +838,8 @@ class AcousticDecoderModel(ModelPT):
         input_types={
             "semantic_tokens": NeuralType(('B', 'C', 'T'), TokenIndex()),
             "semantic_lens": NeuralType(tuple('B'), LengthsType()),
+            "context": NeuralType(('B', 'D', 'T_context'), EncodedRepresentation()),
+            "context_lens": NeuralType(tuple('B'), LengthsType()),
             "text": NeuralType(('B', 'T_text'), TokenIndex()),
             "text_lens": NeuralType(tuple('B'), LengthsType()),
             "num_audio_iters": NeuralType((), IntType(), optional=True),
@@ -461,6 +855,8 @@ class AcousticDecoderModel(ModelPT):
         self,
         semantic_tokens,
         semantic_lens,
+        context,
+        context_lens,
         text,
         text_lens,
         num_audio_iters=1,
@@ -468,8 +864,12 @@ class AcousticDecoderModel(ModelPT):
         audio_topk=None,
         audio_temperature=None,
     ):
+        # [batch_size, context_len]
         audio_mask = get_mask_from_lengths(semantic_lens)
+        context_mask = get_mask_from_lengths(context_lens)
         text_mask = get_mask_from_lengths(text_lens)
+
+        context = rearrange(context, 'B D T -> B T D')
 
         text_enc = self.text_encoder(text=text, text_mask=text_mask)
 
@@ -482,6 +882,8 @@ class AcousticDecoderModel(ModelPT):
         encoded = self.encoder(
             inputs=encoder_input,
             audio_mask=audio_mask,
+            context=context,
+            context_mask=context_mask,
             text_enc=text_enc,
             text_mask=text_mask,
         )
@@ -489,6 +891,8 @@ class AcousticDecoderModel(ModelPT):
         audio_tokens = self._audio_token_infer(
             inputs=encoded,
             audio_lens=semantic_lens,
+            context=context,
+            context_mask=context_mask,
             text_enc=text_enc,
             text_mask=text_mask,
             num_iters=num_audio_iters,
