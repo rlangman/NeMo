@@ -917,6 +917,7 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
         log_audio: bool = False,
         log_audio_gta: bool = False,
         log_alignment: bool = False,
+        word_stride: int = 3,
         num_audio_iters: int = 1,
         num_audio_denoise_iters: int = 0,
         audio_topk: int = 1,
@@ -930,6 +931,7 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
         self.log_audio = log_audio
         self.log_audio_gta = log_audio_gta
         self.log_alignment = log_alignment
+        self.word_stride = word_stride
         self.num_audio_iters = num_audio_iters
         self.num_audio_denoise_iters =  num_audio_denoise_iters
         self.audio_topk = audio_topk
@@ -1003,7 +1005,7 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
                 context_emb=context_emb,
                 context=context,
                 context_lens=context_lens,
-                num_audio_iters=self.num_audio_iters,
+                word_stride=self.word_stride,
                 audio_topk=self.audio_topk,
                 audio_temperature=self.audio_temperature,
                 num_duration_iters=self.num_duration_iters,
@@ -1065,7 +1067,7 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
                 text_lens=text_lens,
                 audio_tokens=audio_tokens,
                 audio_token_lens=audio_token_lens,
-                num_audio_iters=self.num_audio_iters,
+                word_stride=self.word_stride,
                 audio_temperature=self.audio_temperature,
                 audio_topk=self.audio_topk,
             )

@@ -258,6 +258,7 @@ class TextDownSampling(NeuralModule):
         output_types={
             "outputs": NeuralType(('B', 'D', 'T'), EncodedRepresentation()),
             "output_lens": NeuralType(tuple('B'), LengthsType()),
+            "text_durs": NeuralType(('B', 'T'), LengthsType()),
         }
     )
     def forward(self, text, text_emb, text_lens):
@@ -273,7 +274,7 @@ class TextDownSampling(NeuralModule):
         output_lens = torch.ceil(output_lens / self.down_sample_rate).int()
         out_mask = get_mask_from_lengths(output_lens)
         outputs = self.downsample_layer(inputs=text_emb_repeated, mask=out_mask)
-        return outputs, output_lens
+        return outputs, output_lens, text_durs
 
 
 class Aligner(NeuralModule):
@@ -348,7 +349,7 @@ class Aligner(NeuralModule):
         text_emb = rearrange(text_emb, "B T D -> B D T")
 
         if self.downsample_layer is not None:
-            text_emb, text_lens = self.downsample_layer(text=text, text_emb=text_emb, text_lens=text_lens)
+            text_emb, text_lens, _ = self.downsample_layer(text=text, text_emb=text_emb, text_lens=text_lens)
             text_mask = get_mask_from_lengths(text_lens)
 
         attn_mask = rearrange(audio_mask, "B T -> B 1 T 1") * rearrange(text_mask, "B T -> B 1 1 T")

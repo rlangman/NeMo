@@ -744,7 +744,7 @@ class DiscreteSpeechModel(ModelPT):
             "text_lens": NeuralType(tuple('B'), LengthsType()),
             "audio_tokens": NeuralType(('B', 'C', 'T_audio'), TokenIndex()),
             "audio_token_lens": NeuralType(tuple('B'), LengthsType()),
-            "num_audio_iters": NeuralType((), IntType()),
+            "word_stride": NeuralType((), IntType()),
             "audio_temperature": NeuralType((), FloatType(), optional=True),
             "audio_topk": NeuralType((), IntType(), optional=True),
         },
@@ -763,7 +763,7 @@ class DiscreteSpeechModel(ModelPT):
         text_lens,
         audio_tokens,
         audio_token_lens,
-        num_audio_iters=1,
+        word_stride=1,
         audio_temperature=None,
         audio_topk=None,
     ):
@@ -811,7 +811,7 @@ class DiscreteSpeechModel(ModelPT):
         context_mask = get_mask_from_lengths(context_lens)
         context = rearrange(context, 'B D T -> B T D')
         # [batch_size, text_len, hidden_dim]
-        text_enc, dur_lens = self.text_encoder(text=text, text_lens=text_lens, context_emb=context_emb)
+        text_enc, dur_lens, text_durs = self.text_encoder(text=text, text_lens=text_lens, context_emb=context_emb)
 
         text_enc_repeated, semantic_lens = regulate_len(durs, text_enc, pace=1.0)
         semantic_mask = get_mask_from_lengths(semantic_lens)
@@ -825,7 +825,10 @@ class DiscreteSpeechModel(ModelPT):
             audio_lens=semantic_lens,
             context=context,
             context_mask=context_mask,
-            num_iters=num_audio_iters,
+            text=text,
+            text_durs=text_durs,
+            durs=durs,
+            word_stride=word_stride,
             temperature=audio_temperature,
             topk=audio_topk,
         )
@@ -1090,23 +1093,68 @@ class DiscreteSpeechModel(ModelPT):
     def list_available_models(cls) -> 'List[PretrainedModelInfo]':
         return []
 
+    def _find_word_starts(self, text, text_durs, durs, audio_lens, word_stride):
+        batch_size = text.shape[0]
+        max_dur_len = durs.shape[1]
+        # [B, T_dur]
+        cum_ends = torch.cumsum(durs, dim=1).long()
+        # [B, T_text, 1]
+        text_repeated, _ = regulate_len(durations=text_durs, enc_out=text.unsqueeze(2).float())
+        # [B, T_text]
+        text_repeated = text_repeated.squeeze(2).long()
+        pad_len = text_repeated.shape[1] % self.text_down_sample_rate
+        text_repeated = torch.nn.functional.pad(text_repeated, (0, pad_len))
+        # [B, T_dur, down_sample_rate]
+        text_repeated = text_repeated.reshape([batch_size, max_dur_len, self.text_down_sample_rate])
+
+        # [B, T_dur]
+        is_space = torch.logical_or(text_repeated == self.space_token, text_repeated == self.bos_token).all(dim=2)
+        word_start_indices = torch.where(is_space, cum_ends + 1, torch.zeros_like(cum_ends))
+
+        word_num = torch.cumsum(is_space, dim=1).long() - 1
+        word_mask = word_num % word_stride == 0
+        word_start_indices = torch.where(word_mask, word_start_indices, torch.zeros_like(word_mask))
+
+        # [B, 1, T_text]
+        word_start_indices_3d = word_start_indices.unsqueeze(1)
+
+        # [T_audio]
+        max_audio_len = audio_lens.max()
+        audio_indices = torch.arange(1, max_audio_len + 1, device=text.device)
+        # [B, T_audio, 1]
+        audio_indices_3d = audio_indices.unsqueeze(0).tile([batch_size, 1]).unsqueeze(2)
+
+        # [B, T_audio]
+        word_starts = (audio_indices_3d == word_start_indices_3d).any(dim=2)
+
+        num_iters = 0
+        for i in range(batch_size):
+            indices = torch.nonzero(word_start_indices[i])
+            for j in range(1, indices.shape[0]):
+                word_dur = word_start_indices[i, indices[j]] - word_start_indices[i, indices[j - 1]]
+                if word_dur > num_iters:
+                    num_iters = word_dur
+
+        return word_starts, num_iters
+
     def _semantic_token_infer(
         self,
         inputs,
         audio_lens,
         context,
         context_mask,
-        num_iters,
+        text,
+        text_durs,
+        durs,
+        word_stride,
         temperature=None,
         topk=None,
     ):
         # [B, T]
         audio_mask = get_mask_from_lengths(audio_lens)
-        num_tokens = inputs.shape[1]
 
-        # [T]
-        index_shift = num_iters * torch.arange(0, math.ceil(num_tokens / num_iters), device=inputs.device)
-        index_shift = rearrange(index_shift, 'T -> 1 T')
+        # [B, T]
+        maskin, num_iters = self._find_word_starts(text=text, text_durs=text_durs, durs=durs, audio_lens=audio_lens, word_stride=word_stride)
 
         # [B, T]
         audio_maskin = torch.zeros_like(audio_mask, dtype=torch.bool)
@@ -1141,12 +1189,8 @@ class DiscreteSpeechModel(ModelPT):
             audio_codes_i = self.vector_quantizer_semantic.decode(indices=audio_tokens_rearrange_i, input_len=audio_lens)
             audio_codes_i = rearrange(audio_codes_i, 'B D T -> B T D')
 
-            top_i = torch.clamp_max(index_shift + i, max=num_tokens - 1)
-            # [B, T // num_iters, T]
-            one_hot = torch.nn.functional.one_hot(top_i, num_classes=num_tokens)
             # [B, T]
-            maskin_i = one_hot.sum(dim=1).bool()
-            maskin_i = torch.where(audio_mask, maskin_i, False)
+            maskin_i = torch.where(audio_mask, maskin, False)
             maskin_i = torch.where(audio_maskin, False, maskin_i)
             maskin_3d_i = rearrange(maskin_i, 'B T -> B T 1')
 
@@ -1154,6 +1198,7 @@ class DiscreteSpeechModel(ModelPT):
             audio_codes = torch.where(maskin_3d_i, audio_codes_i, audio_codes)
 
             audio_maskin = torch.logical_or(audio_maskin, maskin_i)
+            maskin = torch.logical_or(maskin, torch.nn.functional.pad(maskin[:, :-1], pad=(1, 0), value=True))
 
         audio_maskin_3d = rearrange(audio_maskin, 'B T -> B T 1')
         audio_tokens = torch.where(audio_maskin_3d, audio_tokens, audio_tokens_i)
@@ -1161,7 +1206,6 @@ class DiscreteSpeechModel(ModelPT):
         audio_tokens = rearrange(audio_tokens, 'B T C -> B C T')
 
         return audio_tokens
-
 
     def _duration_infer(
         self,
@@ -1308,7 +1352,7 @@ class DiscreteSpeechModel(ModelPT):
         context = rearrange(context, 'B D T -> B T D')
         speaking_rate_indices_pred, speaking_rate_logits = self.speaking_rate_predictor(context_emb=context_emb)
         # [batch_size, text_len, hidden_dim]
-        text_enc, dur_lens = self.text_encoder(text=text, text_lens=text_lens, context_emb=context_emb)
+        text_enc, dur_lens, _ = self.text_encoder(text=text, text_lens=text_lens, context_emb=context_emb)
         dur_mask = get_mask_from_lengths(dur_lens)
         dur_enc = self.duration_encoder(
             text_enc=text_enc, text_mask=dur_mask, speaking_rate=speaking_rate, context=context, context_mask=context_mask
@@ -1353,7 +1397,7 @@ class DiscreteSpeechModel(ModelPT):
             "context_emb": NeuralType(('B', 'D'), EncodedRepresentation()),
             "context": NeuralType(('B', 'D', 'T_context'), EncodedRepresentation()),
             "context_lens": NeuralType(tuple('B'), LengthsType()),
-            "num_audio_iters": NeuralType((), IntType(), optional=True),
+            "word_stride": NeuralType((), IntType(), optional=True),
             "audio_topk": NeuralType((), IntType(), optional=True),
             "audio_temperature": NeuralType((), FloatType(), optional=True),
             "num_duration_iters": NeuralType((), IntType(), optional=True),
@@ -1376,7 +1420,7 @@ class DiscreteSpeechModel(ModelPT):
         context_emb,
         context,
         context_lens,
-        num_audio_iters=1,
+        word_stride=1,
         audio_topk=None,
         audio_temperature=None,
         num_duration_iters=1,
@@ -1399,7 +1443,7 @@ class DiscreteSpeechModel(ModelPT):
             speaking_rate = torch.clamp(speaking_rate, min=min_speaking_rate, max=max_speaking_rate)
 
         # [batch_size, text_len, hidden_dim]
-        text_enc, dur_lens = self.text_encoder(text=text, text_lens=text_lens, context_emb=context_emb)
+        text_enc, dur_lens, text_durs = self.text_encoder(text=text, text_lens=text_lens, context_emb=context_emb)
         # [batch_size, text_len]
         dur_mask = get_mask_from_lengths(dur_lens)
         dur_enc = self.duration_encoder(
@@ -1429,7 +1473,10 @@ class DiscreteSpeechModel(ModelPT):
             audio_lens=semantic_lens,
             context=context,
             context_mask=context_mask,
-            num_iters=num_audio_iters,
+            text=text,
+            text_durs=text_durs,
+            durs=durs,
+            word_stride=word_stride,
             temperature=audio_temperature,
             topk=audio_topk,
         )

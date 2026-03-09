@@ -89,6 +89,7 @@ class TextEncoder(NeuralModule):
         return {
             "out": NeuralType(('B', 'T', 'D'), EncodedRepresentation()),
             "out_lens": NeuralType(tuple('B'), LengthsType()),
+            "text_durs": NeuralType(('B', 'T'), LengthsType()),
         }
 
     @typecheck()
@@ -107,10 +108,12 @@ class TextEncoder(NeuralModule):
 
         if self.downsample_layer is not None:
             out = rearrange(out, 'B T D -> B D T')
-            out, out_lens = self.downsample_layer(text=text, text_emb=out, text_lens=text_lens)
+            out, out_lens, text_durs = self.downsample_layer(text=text, text_emb=out, text_lens=text_lens)
             out = rearrange(out, 'B D T -> B T D')
         else:
             out_lens = text_lens
+            text_durs = torch.ones_like(text)
+            text_durs = text_durs * text_mask
 
         out_mask = get_mask_from_lengths(out_lens)
 
@@ -119,7 +122,7 @@ class TextEncoder(NeuralModule):
         out = out + context_res
         out = out * rearrange(out_mask, 'B T -> B T 1')
 
-        return out, out_lens
+        return out, out_lens, text_durs
 
 
 class DurationTransformer(NeuralModule):
