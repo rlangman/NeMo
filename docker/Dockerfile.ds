@@ -130,9 +130,6 @@ RUN INSTALL_MSG=$(/bin/bash /tmp/nemo/scripts/installers/install_k2.sh); INSTALL
   else echo "Skipping failed k2 installation"; fi \
   else echo "k2 installed successfully"; fi
 
-# install torch
-RUN pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
-
 # install nemo dependencies
 WORKDIR /tmp/nemo
 ENV LHOTSE_REQUIRE_TORCHAUDIO=0
@@ -141,8 +138,6 @@ COPY requirements .
 RUN for f in $(ls requirements*.txt | grep -v 'requirements_vllm.txt'); do \
     pip3 install --disable-pip-version-check --no-cache-dir -r $f; done
 
-# install flash attention
-RUN pip install flash-attn==2.5.8
 # install numba for latest containers
 RUN pip install numba>=0.57.1
 
@@ -162,6 +157,12 @@ RUN /usr/bin/test -n "$NEMO_VERSION" && \
 
 # Install NeMo
 RUN --mount=from=nemo-src,target=/tmp/nemo,rw cd /tmp/nemo && pip install ".[all]"
+
+# Reinstall with compatible torch version
+RUN pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+
+# install flash attention
+RUN pip install flash-attn==2.5.8 --no-build-isolation --no-cache-dir
 
 # Check install
 # NB: adjusting LD_LIBRARY_PATH (only here, should not be persistent!) is a temporary hack

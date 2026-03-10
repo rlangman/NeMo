@@ -10,7 +10,7 @@ protobuf~=5.29.5
 python-dateutil
 ruamel.yaml
 scikit-learn
-setuptools>=70.0.0
+setuptools==80.0.0
 tensorboard
 text-unidecode
 torch

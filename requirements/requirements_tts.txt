@@ -13,4 +13,4 @@ pandas
 pypinyin
 pypinyin-dict
 seaborn
-
+setuptools>=70.0.0
