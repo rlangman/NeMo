@@ -134,10 +134,10 @@ class AudioCodecModel(ModelPT):
             self.asr_loss_scale = cfg.get("asr_loss_scale", 0.5)
 
         else:
-            self.slm_encoder = None
-            self.slm_decoder = None
-            self.slm_loss_fn = None
-            self.slm_loss_scale = None
+            self.asr_encoder = None
+            self.asr_decoder = None
+            self.asr_loss_fn = None
+            self.asr_loss_scale = None
 
         # Discriminator setup
         if cfg.get("discriminator"):

@@ -263,9 +263,11 @@ class SLMDecoder(NeuralModule):
         up_sample_rate: int,
         kernel_size: int = 3,
         padding_mode: str = "replicate",
+        activation: str = "none",
     ):
         super().__init__()
         padding = get_padding(kernel_size=kernel_size)
+        self.activation = CodecActivation(activation=activation)
         self.input_layer = nn.Conv1d(
             in_channels=in_channels,
             out_channels=hidden_dim,
@@ -307,7 +309,9 @@ class SLMDecoder(NeuralModule):
     @typecheck()
     def forward(self, inputs):
         out = self.input_layer(inputs)
+        out = self.activation(out)
         out = self.upsample_layer(out)
+        out = self.activation(out)
         out = self.output_layer(out)
         return out
 
@@ -373,10 +377,12 @@ class ASRDecoder(NeuralModule):
         out_channels: int,
         down_sample_rate: int,
         kernel_size: int = 3,
-        padding_mode: str = "replicate"
+        padding_mode: str = "replicate",
+        activation: str = "none",
     ):
         super().__init__()
         padding = get_padding(kernel_size=kernel_size)
+        self.activation = CodecActivation(activation)
         self.input_layer = nn.Conv1d(
             in_channels=in_channels,
             out_channels=hidden_dim,
@@ -418,7 +424,9 @@ class ASRDecoder(NeuralModule):
     @typecheck()
     def forward(self, inputs):
         out = self.input_layer(inputs)
+        out = self.activation(out)
         out = self.downsample_layer(out)
+        out = self.activation(out)
         out = self.output_layer(out)
         return out
 
@@ -731,6 +739,8 @@ class CodecActivation(nn.Module):
             self.activation = Snake(channels)
         elif activation == "half_snake":
             self.activation = HalfSnake(channels)
+        elif activation == "none":
+            self.activation = torch.nn.Identity()
         else:
             raise ValueError(f"Unknown activation {activation}")
 
@@ -1442,6 +1452,10 @@ class VectorQuantizerBase(NeuralModule, ABC):
         pass
 
 
+def uniform_activation(inputs):
+    return 2 * torch.sigmoid(1.6 * inputs) - 1
+
+
 class FiniteScalarQuantizer(VectorQuantizerBase):
     """This quantizer is based on the Finite Scalar Quantization (FSQ) method.
     It quantizes each element of the input vector independently into a number of levels.
@@ -1454,7 +1468,7 @@ class FiniteScalarQuantizer(VectorQuantizerBase):
         Mentzer et al., Finite Scalar Quantization: VQ-VAE Made Simple (https://arxiv.org/abs/2309.15505v1)
     """
 
-    def __init__(self, num_levels: List[int], eps: float = 1e-3):
+    def __init__(self, num_levels: List[int], eps: float = 1e-3, activation="tanh"):
         super().__init__()
 
         # index base per dimension of the input vector
@@ -1470,6 +1484,13 @@ class FiniteScalarQuantizer(VectorQuantizerBase):
 
         # Regularization
         self.eps = eps
+
+        if activation == "tanh":
+            self.activation = torch.tanh
+        elif activation == "uniform":
+            self.activation = uniform_activation
+        else:
+            raise ValueError(f"Unknown activation {activation}")
 
         logging.debug('Initializing %s with', self.__class__.__name__)
         logging.debug('\tdim:           %s', self.dim)
@@ -1539,7 +1560,8 @@ class FiniteScalarQuantizer(VectorQuantizerBase):
         # shift for even number of levels
         input_shift = (output_offset / output_scale).tan()
         # compressed output
-        output = output_scale * (inputs + input_shift).tanh() - output_offset
+        output = self.activation(inputs + input_shift)
+        output = output_scale * output - output_offset
         return output
 
     @typecheck(
