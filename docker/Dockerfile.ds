@@ -130,14 +130,22 @@ RUN INSTALL_MSG=$(/bin/bash /tmp/nemo/scripts/installers/install_k2.sh); INSTALL
   else echo "Skipping failed k2 installation"; fi \
   else echo "k2 installed successfully"; fi
 
+# install torch
+RUN pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+
 # install nemo dependencies
 WORKDIR /tmp/nemo
 ENV LHOTSE_REQUIRE_TORCHAUDIO=0
 COPY requirements .
 # exclude requirements_vllm.txt, since `vllm==0.5.x` breaks the container due to hardcoded requirements `torch==2.3.0`
-RUN for f in $(ls requirements*.txt | grep -v 'requirements_vllm.txt'); do \
-    pip3 install --disable-pip-version-check --no-cache-dir -r $f; done
+#RUN for f in $(ls requirements*.txt | grep -v 'requirements_vllm.txt'); do \
+#    pip3 install --disable-pip-version-check --no-cache-dir -r $f; done
 
+RUN pip3 install --disable-pip-version-check --no-cache-dir -r requirements.txt
+RUN pip3 install --disable-pip-version-check --no-cache-dir -r requirements_tts.txt
+
+# install flash attention
+RUN pip install flash-attn==2.5.8
 # install numba for latest containers
 RUN pip install numba>=0.57.1
 
@@ -156,21 +164,14 @@ RUN /usr/bin/test -n "$NEMO_VERSION" && \
   /bin/echo "export BASE_IMAGE=${BASE_IMAGE}" >> /root/.bashrc
 
 # Install NeMo
-RUN --mount=from=nemo-src,target=/tmp/nemo,rw cd /tmp/nemo && pip install ".[all]"
-
-# Reinstall with compatible torch version
-RUN pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
-
-# install flash attention
-RUN pip install flash-attn==2.5.8 --no-build-isolation --no-cache-dir
+#RUN --mount=from=nemo-src,target=/tmp/nemo,rw cd /tmp/nemo && pip install ".[all]"
+RUN --mount=from=nemo-src,target=/tmp/nemo,rw cd /tmp/nemo && pip install ".[tts]"
 
 # Check install
 # NB: adjusting LD_LIBRARY_PATH (only here, should not be persistent!) is a temporary hack
 # to avoid failure if CUDA is unavailable (`docker build` does not expose GPUs)
 # The error is raised in NeMo Core, and the main reason is reinstalled Transformer-Engine;
 RUN CHECK_MSG=$(export LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:${CUDA_HOME}/compat/lib.real && \
-  python -c "import nemo.collections.asr as nemo_asr" && \
-  python -c "import nemo.collections.nlp as nemo_nlp" && \
   python -c "import nemo.collections.tts as nemo_tts" && \
   python -c "import nemo_text_processing.text_normalization as text_normalization"); CHECK_CODE=$?; \
   echo ${CHECK_MSG}; \
