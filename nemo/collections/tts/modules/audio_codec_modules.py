@@ -260,7 +260,7 @@ class SLMDecoder(NeuralModule):
         in_channels: int,
         hidden_dim: int,
         out_channels: int,
-        up_sample_rate: int,
+        up_sample_rate: int = 1,
         kernel_size: int = 3,
         padding_mode: str = "replicate",
         activation: str = "none",
@@ -283,16 +283,19 @@ class SLMDecoder(NeuralModule):
             padding_mode=padding_mode,
         )
 
-        up_kernel_size = 2 * up_sample_rate
-        up_padding, output_padding = get_up_sample_padding(up_kernel_size, up_sample_rate)
-        self.upsample_layer = nn.ConvTranspose1d(
-            in_channels=hidden_dim,
-            out_channels=hidden_dim,
-            kernel_size=up_kernel_size,
-            stride=up_sample_rate,
-            padding=up_padding,
-            output_padding=output_padding,
-        )
+        if up_sample_rate > 1:
+            up_kernel_size = 2 * up_sample_rate
+            up_padding, output_padding = get_up_sample_padding(up_kernel_size, up_sample_rate)
+            self.upsample_layer = nn.ConvTranspose1d(
+                in_channels=hidden_dim,
+                out_channels=hidden_dim,
+                kernel_size=up_kernel_size,
+                stride=up_sample_rate,
+                padding=up_padding,
+                output_padding=output_padding,
+            )
+        else:
+            self.upsample_layer = None
 
     @property
     def input_types(self):
@@ -310,8 +313,9 @@ class SLMDecoder(NeuralModule):
     def forward(self, inputs):
         out = self.input_layer(inputs)
         out = self.activation(out)
-        out = self.upsample_layer(out)
-        out = self.activation(out)
+        if self.upsample_layer is not None:
+            out = self.upsample_layer(out)
+            out = self.activation(out)
         out = self.output_layer(out)
         return out
 
