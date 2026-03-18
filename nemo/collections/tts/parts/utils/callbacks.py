@@ -832,7 +832,7 @@ class AcousticDecoderArtifactGenerator(ArtifactGenerator):
 
         with torch.no_grad():
             semantic_tokens = audio_tokens[:, :1, :]
-            acoustic_tokens_pred = model.infer(
+            audio_tokens_pred = model.infer(
                 semantic_tokens=semantic_tokens,
                 semantic_lens=audio_token_lens,
                 text=text,
@@ -842,8 +842,6 @@ class AcousticDecoderArtifactGenerator(ArtifactGenerator):
                 audio_topk=self.audio_topk,
                 audio_temperature=self.audio_temperature,
             )
-            # [B, C, T]
-            audio_tokens_pred = torch.concat([semantic_tokens, acoustic_tokens_pred], dim=1)
 
         if self.log_audio:
             with torch.no_grad():
@@ -1014,7 +1012,7 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
                 silence_pad_start=self.silence_pad_start,
                 silence_pad_end=self.silence_pad_end,
             )
-            acoustic_tokens_pred = acoustic_decoder.infer(
+            audio_tokens_pred = acoustic_decoder.infer(
                 semantic_tokens=semantic_tokens_pred,
                 semantic_lens=audio_token_lens,
                 text=text,
@@ -1024,7 +1022,6 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
                 audio_topk=self.audio_topk,
                 audio_temperature=self.audio_temperature,
             )
-            audio_tokens_pred = torch.concat([semantic_tokens_pred, acoustic_tokens_pred], dim=1)
 
         if self.log_audio:
             with torch.no_grad():
