@@ -15,18 +15,19 @@
 import contextlib
 import io
 import json
+import math
 import os
 import random
 from dataclasses import dataclass
-from hydra.utils import instantiate
-import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
-import webdataset as wds
 import torch.utils.data
+import webdataset as wds
+from hydra.utils import instantiate
+from torch.utils.data import IterableDataset
 
 from nemo.collections.asr.data.audio_to_text import expand_sharded_filepaths
 from nemo.collections.asr.parts.utils.manifest_utils import read_manifest
@@ -34,10 +35,10 @@ from nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers import Bas
 from nemo.collections.tts.parts.preprocessing.feature_processors import FeatureProcessor
 from nemo.collections.tts.parts.preprocessing.features import FeatureReader
 from nemo.collections.tts.parts.utils.tarred_dataset_utils import (
+    FileFilterIterator,
+    TarredMetadata,
     create_tarred_dataset,
     process_tarred_manifest,
-    FileFilterIterator,
-    TarredMetadata
 )
 from nemo.collections.tts.parts.utils.tts_dataset_utils import (
     _read_audio,
@@ -52,7 +53,6 @@ from nemo.collections.tts.parts.utils.tts_dataset_utils import (
 from nemo.core.classes import Dataset
 from nemo.utils import logging
 from nemo.utils.decorators import experimental
-from torch.utils.data import IterableDataset
 
 
 @dataclass
@@ -111,7 +111,9 @@ def create_text_to_speech_dataset(
             dataset = TarredTextToSpeechDataset(
                 text_tokenizer=text_tokenizer, global_rank=global_rank, world_size=world_size, **dataset_args
             )
-            dataset = DurationBatchedTextToSpeechDataset(dataset, batch_duration=batch_duration, steps_per_epoch=steps_per_epoch)
+            dataset = DurationBatchedTextToSpeechDataset(
+                dataset, batch_duration=batch_duration, steps_per_epoch=steps_per_epoch
+            )
             return dataset
         else:
             raise ValueError(f"Unknown dataset type {dataset_type}")
@@ -122,17 +124,19 @@ def text_to_speech_collate_fn(
     feature_readers: List[FeatureReader],
     feature_processors: List[FeatureProcessor],
     text_pad_value: Optional[int],
-    include_speaker: bool
+    include_speaker: bool,
 ):
     dataset_name_list = []
     audio_filepath_list = []
     token_list = []
     token_len_list = []
     speaker_list = []
+    text_list = []
 
     for example in batch:
         dataset_name_list.append(example["dataset_name"])
         audio_filepath_list.append(example["audio_filepath"])
+        text_list.append(example["text"])
 
         if "tokens" in example:
             token_list.append(example["tokens"])
@@ -144,6 +148,7 @@ def text_to_speech_collate_fn(
     batch_dict = {
         "dataset_names": dataset_name_list,
         "audio_filepaths": audio_filepath_list,
+        "text_string": text_list,
     }
 
     if len(token_list) > 0:
@@ -326,6 +331,7 @@ class TextToSpeechDataset(Dataset):
             "dataset_name": data.dataset_name,
             "audio_filepath": audio_filepath_rel,
             "duration": data.manifest_entry["duration"],
+            "text": data.text,
         }
 
         if self.text_tokenizer is not None:
@@ -356,13 +362,13 @@ class TextToSpeechDataset(Dataset):
             feature_readers=self.feature_readers,
             feature_processors=self.feature_processors,
             text_pad_value=self.text_pad_value,
-            include_speaker=self.include_speaker
+            include_speaker=self.include_speaker,
         )
 
 
 class TarredTextToSpeechDataset(IterableDataset):
-    """
-    """
+    """ """
+
     def __init__(
         self,
         dataset_meta: Dict,
@@ -445,24 +451,27 @@ class TarredTextToSpeechDataset(IterableDataset):
                 shuffle_n_shard=shuffle_n_shard,
                 shard_strategy=shard_strategy,
                 global_rank=global_rank,
-                world_size=world_size
+                world_size=world_size,
             )
             if web_dataset is not None:
                 web_datasets.append(web_dataset)
                 dataset_lengths.append(dataset_length)
 
         self.dataset = create_tarred_dataset(
-            datasets=web_datasets,
-            dataset_lengths=dataset_lengths,
-            sample_type=sample_type,
-            sample_args=sample_args
+            datasets=web_datasets, dataset_lengths=dataset_lengths, sample_type=sample_type, sample_args=sample_args
         )
 
         if len(self.dataset) == 0:
             raise ValueError(f"Final dataset is empty.")
 
     def _create_web_dataset(
-        self, tar_filepath: str, shuffle_n: int, shuffle_n_shard: int, shard_strategy: str, global_rank: int, world_size: int
+        self,
+        tar_filepath: str,
+        shuffle_n: int,
+        shuffle_n_shard: int,
+        shard_strategy: str,
+        global_rank: int,
+        world_size: int,
     ):
         tar_filepaths = expand_sharded_filepaths(
             sharded_filepaths=tar_filepath,
@@ -477,9 +486,7 @@ class TarredTextToSpeechDataset(IterableDataset):
             return None
 
         key_names = ["key"]
-        rename_args = {
-            "key": "__key__"
-        }
+        rename_args = {"key": "__key__"}
         for feature_reader in self.feature_readers:
             key_names.append(feature_reader.feature_name)
             rename_args[feature_reader.feature_name] = feature_reader.get_tarred_suffixes()
@@ -504,20 +511,21 @@ class TarredTextToSpeechDataset(IterableDataset):
         entry = data.manifest_entry
 
         audio_filepath = Path(data.manifest_entry["audio_filepath"])
+
+        if "normalized_text" in entry:
+            text = entry["normalized_text"]
+        else:
+            text = entry["text"]
+
         example = {
             "dataset_name": data.dataset_name,
             "audio_filepath": audio_filepath,
             "duration": data.manifest_entry["duration"],
+            "text": text,
         }
 
         if self.text_tokenizer:
-            if "normalized_text" in entry:
-                text = entry["normalized_text"]
-            else:
-                text = entry["text"]
-
             text = dropout_pc(text=text, dropout_rate=self.pc_dropout_rate)
-
             tokens = self.text_tokenizer(text)
             tokens = torch.tensor(tokens, dtype=torch.int32)
             text_len = tokens.shape[0]
@@ -579,7 +587,7 @@ class DurationBatchedTextToSpeechDataset(IterableDataset):
         self.batch_size_dict = {}
         for i in range(min_duration, max_duration + 1):
             self.batch_dict[i] = []
-            effective_duration = i + (i ** 2) / quadratic_duration
+            effective_duration = i + (i**2) / quadratic_duration
             batch_size = int(batch_duration / effective_duration)
             self.batch_size_dict[i] = batch_size
 

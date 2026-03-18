@@ -149,8 +149,24 @@ class AudioCodecModel(ModelPT):
         # Discriminator setup
         if cfg.get("discriminator"):
             self.discriminator = instantiate(cfg.discriminator)
+            self.gen_loss_scale = cfg.get("gen_loss_scale", 1.0)
+            self.gen_loss_fn = instantiate(cfg.generator_loss)
+            self.disc_loss_fn = instantiate(cfg.discriminator_loss)
+            self.feature_loss_scale = cfg.get("feature_loss_scale", 1.0)
+            feature_loss_type = cfg.get("feature_loss_type", "relative")
+            if feature_loss_type == "relative":
+                self.feature_loss_fn = RelativeFeatureMatchingLoss()
+            elif feature_loss_type == "absolute":
+                self.feature_loss_fn = FeatureMatchingLoss()
+            else:
+                raise ValueError(f'Unknown feature loss type {feature_loss_type}.')
         else:
             self.discriminator = None
+            self.gen_loss_scale = None
+            self.gen_loss_fn = None
+            self.disc_loss_fn = None
+            self.feature_loss_scale = None
+            self.feature_loss_fn = None
 
         if cfg.get("semantic_codec"):
             semantic_codec_cfg = cfg.get("semantic_codec")
@@ -162,8 +178,8 @@ class AudioCodecModel(ModelPT):
             semantic_codec = None
 
         if semantic_codec is not None:
-            self.semantic_codec.eval()
-            self.semantic_codec.freeze()
+            semantic_codec.eval()
+            semantic_codec.freeze()
             self.register_nemo_submodule(name="semantic_codec", config_field="semantic_codec", model=semantic_codec)
         else:
             self.semantic_codec = None
@@ -195,12 +211,6 @@ class AudioCodecModel(ModelPT):
         self.time_domain_loss_fn = TimeDomainLoss()
         self.si_sdr_loss_fn = SISDRLoss()
 
-        # Discriminator loss setup
-        self.gen_loss_scale = cfg.get("gen_loss_scale", 1.0)
-        self.feature_loss_scale = cfg.get("feature_loss_scale", 1.0)
-        self.gen_loss_fn = instantiate(cfg.generator_loss)
-        self.disc_loss_fn = instantiate(cfg.discriminator_loss)
-
         if "mmd_loss" in cfg:
             self.mmd_loss_fn = instantiate(cfg.mmd_loss)
             self.mmd_loss_scale = cfg.get("mmd_loss_scale", 1.0)
@@ -216,14 +226,6 @@ class AudioCodecModel(ModelPT):
         else:
             self.mmd_time_loss_fn = None
             self.mmd_time_loss_scale = None
-
-        feature_loss_type = cfg.get("feature_loss_type", "relative")
-        if feature_loss_type == "relative":
-            self.feature_loss_fn = RelativeFeatureMatchingLoss()
-        elif feature_loss_type == "absolute":
-            self.feature_loss_fn = FeatureMatchingLoss()
-        else:
-            raise ValueError(f'Unknown feature loss type {feature_loss_type}.')
 
         # Codebook loss setup
         if self.vector_quantizer:

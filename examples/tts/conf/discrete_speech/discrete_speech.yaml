@@ -4,8 +4,9 @@
 
 name: DiscreteSpeech
 
-max_epochs: ???
 batch_size: ???
+
+max_epochs: ???
 
 feature_name: ???
 audio_codec_path: ???
@@ -21,13 +22,16 @@ heteronyms_path: ???
 
 log_dir: ???
 
-codebook_num: 8
-codebook_levels: [4, 4, 4, 4, 4, 4]
-codebook_dim: 48
-codebook_size: 4096
+codebook_num: 22
+codebook_levels: [4, 4, 4, 4]
+codebook_dim: 88
+codebook_size: 256
+
+codebook_num_codec: 11
+codebook_levels_codec: [4, 4, 4, 4, 4, 4, 4, 4]
 
 semantic_codebook_num: 1
-semantic_codebook_dim: 6
+semantic_codebook_dim: 4
 
 context_min_len: 50
 context_max_len: 125
@@ -56,8 +60,8 @@ audio_hidden_dim: 512
 audio_filters: 2048
 
 model:
-  text_down_sample_rate: 3
-  space_dur: 5
+  text_down_sample_rate: 2
+  space_dur: 3
   inference_phoneme_probability: 1.0
 
   context_min_len: ${context_min_len}
@@ -73,10 +77,10 @@ model:
     num_groups: ${codebook_num}
     num_levels_per_group: ${codebook_levels}
 
-  vector_quantizer_semantic:
+  vector_quantizer_codec:
     _target_: nemo.collections.tts.modules.audio_codec_modules.GroupFiniteScalarQuantizer
-    num_groups: ${semantic_codebook_num}
-    num_levels_per_group: ${codebook_levels}
+    num_groups: ${codebook_num_codec}
+    num_levels_per_group: ${codebook_levels_codec}
 
   text_tokenizer:
     _target_: nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers.IPATokenizer
@@ -146,10 +150,10 @@ model:
         log_audio: true
         log_audio_gta: false
         log_alignment: false
-        num_audio_iters: 20
+        num_audio_iters: 10
         num_duration_iters: 10
-        silence_pad_start: 5
-        silence_pad_end: 5
+        silence_pad_start: 2
+        silence_pad_end: 2
 
     dataset:
       dataset_type: default
@@ -268,7 +272,7 @@ model:
 
   optim:
     name: adamw
-    lr: 2e-2
+    lr: 1e-2
     betas: [0.9, 0.999]
     weight_decay: 1e-6
 

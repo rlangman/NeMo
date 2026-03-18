@@ -772,6 +772,8 @@ class IPATokenizer(BaseTokenizer):
                 self.punct_list = get_ipa_punctuation_list(locale)
 
             tokens.update(self.punct_list)
+        else:
+            self.punct_list = []
 
         # Sort to ensure that vocab is in the same order every time
         tokens = sorted(list(tokens))
@@ -842,7 +844,7 @@ class IPATokenizer(BaseTokenizer):
                     message = f"Text: [{''.join(g2p_text)}] contains unknown char/phoneme: [{p}]."
                     if raw_text is not None:
                         message += f"Original text: [{raw_text}]. Symbol will be skipped."
-                    logging.warning(message)
+                    logging.debug(message)
                 else:
                     ps.append(self.OOV)
 
