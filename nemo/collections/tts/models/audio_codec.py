@@ -162,8 +162,8 @@ class AudioCodecModel(ModelPT):
             semantic_codec = None
 
         if semantic_codec is not None:
-            self.semantic_codec.eval()
-            self.semantic_codec.freeze()
+            semantic_codec.eval()
+            semantic_codec.freeze()
             self.register_nemo_submodule(name="semantic_codec", config_field="semantic_codec", model=semantic_codec)
         else:
             self.semantic_codec = None

@@ -22,8 +22,6 @@ ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:24.07-py3
 FROM ${BASE_IMAGE} as nemo-deps
 
 # dependency flags; should be declared after FROM
-# torchaudio: not required by default
-ARG REQUIRE_TORCHAUDIO=false
 # k2: not required by default
 ARG REQUIRE_K2=false
 # ais cli: not required by default, install only if required
@@ -64,6 +62,7 @@ RUN apt-get update && \
   libgts-dev && \
   rm -rf /var/lib/apt/lists/*
 
+
 WORKDIR /workspace/
 
 ARG TE_TAG=7d576ed25266a17a7b651f2c12e8498f67e0baea
@@ -96,18 +95,6 @@ WORKDIR /tmp/
 # uninstall stuff from base container
 RUN pip3 uninstall -y sacrebleu torchtext
 
-# build torchaudio
-#WORKDIR /tmp/torchaudio_build
-#COPY scripts/installers /tmp/torchaudio_build/scripts/installers/
-#RUN INSTALL_MSG=$(/bin/bash /tmp/torchaudio_build/scripts/installers/install_torchaudio_latest.sh); INSTALL_CODE=$?; \
-#  echo ${INSTALL_MSG}; \
-#  if [ ${INSTALL_CODE} -ne 0 ]; then \
-#  echo "torchaudio installation failed";  \
-#  if [ "${REQUIRE_TORCHAUDIO}" = true ]; then \
-#  exit ${INSTALL_CODE};  \
-#  else echo "Skipping failed torchaudio installation"; fi \
-#  else echo "torchaudio installed successfully"; fi
-
 COPY scripts /tmp/nemo/scripts/
 # install correct graphviz version (k2 and pynini visualization tool), skip if installation fails
 RUN INSTALL_MSG=$(/bin/bash /tmp/nemo/scripts/installers/install_graphviz.sh --docker); INSTALL_CODE=$?; \
@@ -130,22 +117,19 @@ RUN INSTALL_MSG=$(/bin/bash /tmp/nemo/scripts/installers/install_k2.sh); INSTALL
   else echo "Skipping failed k2 installation"; fi \
   else echo "k2 installed successfully"; fi
 
-# install torch
-RUN pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
-
 # install nemo dependencies
 WORKDIR /tmp/nemo
 ENV LHOTSE_REQUIRE_TORCHAUDIO=0
 COPY requirements .
-# exclude requirements_vllm.txt, since `vllm==0.5.x` breaks the container due to hardcoded requirements `torch==2.3.0`
-#RUN for f in $(ls requirements*.txt | grep -v 'requirements_vllm.txt'); do \
-#    pip3 install --disable-pip-version-check --no-cache-dir -r $f; done
+
+# install torch
+RUN pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
 
 RUN pip3 install --disable-pip-version-check --no-cache-dir -r requirements.txt
 RUN pip3 install --disable-pip-version-check --no-cache-dir -r requirements_tts.txt
 
 # install flash attention
-RUN pip install flash-attn==2.5.8
+RUN pip install flash-attn
 # install numba for latest containers
 RUN pip install numba>=0.57.1
 
@@ -164,7 +148,6 @@ RUN /usr/bin/test -n "$NEMO_VERSION" && \
   /bin/echo "export BASE_IMAGE=${BASE_IMAGE}" >> /root/.bashrc
 
 # Install NeMo
-#RUN --mount=from=nemo-src,target=/tmp/nemo,rw cd /tmp/nemo && pip install ".[all]"
 RUN --mount=from=nemo-src,target=/tmp/nemo,rw cd /tmp/nemo && pip install ".[tts]"
 
 # Check install

@@ -1,4 +1,4 @@
-# Copyright (c) 2021, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,7 +22,6 @@ from nemo.collections.tts.modules.transformer import PositionalEmbedding
 from nemo.core.classes import NeuralModule, typecheck
 from nemo.core.neural_types.elements import EncodedRepresentation, MaskType
 from nemo.core.neural_types.neural_type import NeuralType
-
 
 
 class LinearFF(nn.Module):
@@ -59,7 +58,7 @@ class ConvNeXtFF(nn.Module):
         self.d_inner = d_inner
         self.dropout = dropout
 
-        padding = (kernel_size // 2)
+        padding = kernel_size // 2
         self.conv = nn.Conv1d(in_channels=d_model, out_channels=d_model, kernel_size=kernel_size, padding=padding)
         self.layer_norm = nn.LayerNorm(d_model)
         self.inner_layer = nn.Linear(in_features=d_model, out_features=d_inner)
@@ -95,7 +94,7 @@ class MultiHeadAttn(nn.Module):
         self.n_head = n_head
         self.d_model = d_model
         self.d_head = d_head
-        self.scale = 1 / (d_head ** 0.5)
+        self.scale = 1 / (d_head**0.5)
 
         self.qkv_net = nn.Linear(d_model, 3 * n_head * d_head)
         self.drop = nn.Dropout(dropout)
@@ -164,7 +163,7 @@ class CrossAttn(nn.Module):
         self.n_head = n_head
         self.d_model = d_model
         self.d_head = d_head
-        self.scale = 1 / (d_head ** 0.5)
+        self.scale = 1 / (d_head**0.5)
 
         self.query_layer = nn.Linear(d_model, n_head * d_head)
         self.key_layer = nn.Linear(d_encoded, n_head * d_head)
@@ -267,8 +266,8 @@ class TransformerLayer(nn.Module):
         else:
             self.pos_ff = ConvNeXtFF(d_model, d_inner, kernel_size, dropout)
 
-    def forward(self, dec_inp, mask):
-        output = self.dec_attn(inputs=dec_inp, mask=mask)
+    def forward(self, inputs, mask):
+        output = self.dec_attn(inputs=inputs, mask=mask)
         output = self.pos_ff(inputs=output)
         output = output * rearrange(mask, 'B T -> B T 1')
         return output
@@ -393,19 +392,20 @@ class ContextTransformer(NeuralModule):
         self.pos_emb = PositionalEmbedding(self.d_model)
 
         self.layer_norm = torch.nn.LayerNorm(self.d_model)
-        self.transformer_layers = nn.ModuleList([
-            TransformerLayer(
-                n_head,
-                d_model,
-                d_head,
-                d_inner,
-                kernel_size,
-                dropout,
-                dropatt=dropatt,
-            )
-            for _ in range(n_layer)
-        ])
-
+        self.transformer_layers = nn.ModuleList(
+            [
+                TransformerLayer(
+                    n_head,
+                    d_model,
+                    d_head,
+                    d_inner,
+                    kernel_size,
+                    dropout,
+                    dropatt=dropatt,
+                )
+                for _ in range(n_layer)
+            ]
+        )
 
     @property
     def input_types(self):
@@ -416,9 +416,7 @@ class ContextTransformer(NeuralModule):
 
     @property
     def output_types(self):
-        return {
-            "out": NeuralType(('B', 'T', 'D'), EncodedRepresentation())
-        }
+        return {"out": NeuralType(('B', 'T', 'D'), EncodedRepresentation())}
 
     @typecheck()
     def forward(self, inputs, mask):
@@ -431,7 +429,7 @@ class ContextTransformer(NeuralModule):
         out = out * mask_3d
 
         for layer in self.transformer_layers:
-            out = layer(out, mask=mask)
+            out = layer(inputs=out, mask=mask)
 
         out = self.layer_norm(out)
         out = out * mask_3d
@@ -440,6 +438,96 @@ class ContextTransformer(NeuralModule):
 
 
 class AudioTransformer(NeuralModule):
+    def __init__(
+        self,
+        n_layer,
+        n_head,
+        d_model,
+        d_head,
+        d_inner,
+        kernel_size=None,
+        dropout=0.1,
+        dropatt=0.1,
+    ):
+        super(AudioTransformer, self).__init__()
+        self.d_model = d_model
+        self.transformer_layers = nn.ModuleList(
+            [
+                TransformerLayer(
+                    n_head=n_head,
+                    d_model=d_model,
+                    d_head=d_head,
+                    d_inner=d_inner,
+                    kernel_size=kernel_size,
+                    dropout=dropout,
+                    dropatt=dropatt,
+                )
+                for _ in range(n_layer)
+            ]
+        )
+
+    @property
+    def input_types(self):
+        return {
+            "inputs": NeuralType(('B', 'T_audio', 'D'), EncodedRepresentation()),
+            "audio_mask": NeuralType(('B', 'T_input'), MaskType()),
+        }
+
+    @property
+    def output_types(self):
+        return {
+            "out": NeuralType(('B', 'T', 'D'), EncodedRepresentation()),
+        }
+
+    def forward(self, inputs, audio_mask):
+        audio_mask_3d = rearrange(audio_mask, 'B T_audio -> B T_audio 1')
+
+        out = inputs
+        for layer in self.transformer_layers:
+            out = layer(inputs=out, mask=audio_mask)
+
+        out = out * audio_mask_3d
+
+        return out
+
+
+class AudioEncoder(NeuralModule):
+    def __init__(self, input_dim, transformer):
+        super(AudioEncoder, self).__init__()
+
+        audio_hidden_dim = transformer.d_model
+        self.input_layer = torch.nn.Linear(input_dim, audio_hidden_dim)
+        self.positional_embedding = PositionalEmbedding(audio_hidden_dim)
+        self.transformer = transformer
+
+    @property
+    def input_types(self):
+        return {
+            "inputs": NeuralType(('B', 'T_audio', 'D'), EncodedRepresentation()),
+            "audio_mask": NeuralType(('B', 'T_audio'), MaskType()),
+        }
+
+    @property
+    def output_types(self):
+        return {
+            "audio_enc": NeuralType(('B', 'T', 'D'), EncodedRepresentation()),
+        }
+
+    def forward(self, inputs, audio_mask):
+        audio_enc = self.input_layer(inputs)
+
+        max_audio_len = audio_mask.shape[1]
+        pos_seq = torch.arange(max_audio_len, device=audio_enc.device).to(audio_enc.dtype)
+        pos_emb = self.positional_embedding(pos_seq)
+
+        audio_enc = audio_enc + pos_emb
+        audio_enc = audio_enc * rearrange(audio_mask, 'B T -> B T 1')
+        audio_enc = self.transformer(inputs=audio_enc, audio_mask=audio_mask)
+
+        return audio_enc
+
+
+class AudioTransformerWithText(NeuralModule):
     def __init__(
         self,
         n_layer,
@@ -453,23 +541,25 @@ class AudioTransformer(NeuralModule):
         dropout_self_att=0.1,
         dropout_context_att=0.1,
     ):
-        super(AudioTransformer, self).__init__()
+        super(AudioTransformerWithText, self).__init__()
         self.d_model = d_model
-        self.transformer_layers = nn.ModuleList([
-            TransformerCrossAttentionLayer(
-                n_head_self=n_head_self,
-                n_head_cross=n_head_text,
-                d_model=d_model,
-                d_encoded=d_model,
-                d_head=d_head,
-                d_inner=d_inner,
-                kernel_size=kernel_size,
-                dropout=dropout,
-                dropout_self_att=dropout_self_att,
-                dropout_cross_att=dropout_context_att,
-            )
-            for _ in range(n_layer)
-        ])
+        self.transformer_layers = nn.ModuleList(
+            [
+                TransformerCrossAttentionLayer(
+                    n_head_self=n_head_self,
+                    n_head_cross=n_head_text,
+                    d_model=d_model,
+                    d_encoded=d_model,
+                    d_head=d_head,
+                    d_inner=d_inner,
+                    kernel_size=kernel_size,
+                    dropout=dropout,
+                    dropout_self_att=dropout_self_att,
+                    dropout_cross_att=dropout_context_att,
+                )
+                for _ in range(n_layer)
+            ]
+        )
 
     @property
     def input_types(self):
@@ -484,7 +574,6 @@ class AudioTransformer(NeuralModule):
     def output_types(self):
         return {
             "out": NeuralType(('B', 'T', 'D'), EncodedRepresentation()),
-
         }
 
     def forward(self, inputs, audio_mask, text_enc, text_mask):
@@ -510,9 +599,9 @@ class AudioTransformer(NeuralModule):
         return out
 
 
-class AudioEncoder(NeuralModule):
+class AudioEncoderWithText(NeuralModule):
     def __init__(self, input_dim, transformer):
-        super(AudioEncoder, self).__init__()
+        super(AudioEncoderWithText, self).__init__()
 
         audio_hidden_dim = transformer.d_model
         self.input_layer = torch.nn.Linear(input_dim, audio_hidden_dim)
@@ -543,9 +632,7 @@ class AudioEncoder(NeuralModule):
 
         audio_enc = audio_enc + pos_emb
         audio_enc = audio_enc * rearrange(audio_mask, 'B T -> B T 1')
-        audio_enc = self.transformer(
-            inputs=audio_enc, audio_mask=audio_mask, text_enc=text_enc, text_mask=text_mask
-        )
+        audio_enc = self.transformer(inputs=audio_enc, audio_mask=audio_mask, text_enc=text_enc, text_mask=text_mask)
 
         return audio_enc
 
@@ -569,18 +656,20 @@ class TextEncoder(NeuralModule):
 
         self.word_emb = nn.Embedding(n_embed, d_model, padding_idx=padding_idx)
         self.pos_emb = PositionalEmbedding(self.d_model)
-        self.text_layers = nn.ModuleList([
-            TransformerLayer(
-                n_head,
-                d_model,
-                d_head,
-                d_inner,
-                kernel_size,
-                dropout,
-                dropatt=dropout_att,
-            )
-            for _ in range(n_layer)
-        ])
+        self.text_layers = nn.ModuleList(
+            [
+                TransformerLayer(
+                    n_head,
+                    d_model,
+                    d_head,
+                    d_inner,
+                    kernel_size,
+                    dropout,
+                    dropatt=dropout_att,
+                )
+                for _ in range(n_layer)
+            ]
+        )
 
     @property
     def input_types(self):
@@ -606,6 +695,6 @@ class TextEncoder(NeuralModule):
         out = out * rearrange(text_mask, 'B T -> B T 1')
 
         for layer in self.text_layers:
-            out = layer(out, mask=text_mask)
+            out = layer(inputs=out, mask=text_mask)
 
         return out
