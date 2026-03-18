@@ -1,6 +1,6 @@
 name: AcousticDecoder
 
-batch_size: ???
+batch_size: 1000
 
 max_epochs: ???
 
@@ -63,6 +63,21 @@ model:
     num_groups: ${acoustic_codebook_num}
     num_levels_per_group: ${acoustic_codebook_levels}
 
+  text_tokenizer:
+    _target_: nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers.IPATokenizer
+    punct: false
+    apostrophe: false
+    pad_with_space: true
+    skip_oov: true
+    add_boundaries: false
+    g2p:
+      _target_: nemo.collections.tts.g2p.models.i18n_ipa.IpaG2p
+      phoneme_dict: ${phoneme_dict_path}
+      heteronyms: ${heteronyms_path}
+      phoneme_probability: 0.8
+      use_chars: true
+      use_stresses: false
+
   train_ds:
     dataset:
       dataset_type: ${train_ds_type}
@@ -70,7 +85,8 @@ model:
         dataset_meta: ${train_ds_meta}
         feature_readers: ${feature_readers}
         batch_duration: ${batch_size}
-        min_duration: 0.5
+        min_words: 2
+        min_duration: 1.0
         max_duration: 20.1
 
     dataloader_params:
@@ -84,6 +100,7 @@ model:
       dataset_args:
         dataset_meta: ${val_ds_meta}
         feature_readers: ${feature_readers}
+        min_words: 2
         min_duration: 1.0
         max_duration: 20.1
 
@@ -117,6 +134,18 @@ model:
       batch_size: 8
       num_workers: 1
 
+  context_encoder:
+    _target_: nemo.collections.tts.modules.acoustic_decoder_modules.ContextEncoder
+    input_dim: ${codebook_dim}
+    encoder:
+      _target_: nemo.collections.tts.modules.acoustic_decoder_transformer.ContextTransformer
+      n_layer: 6
+      n_head: 8
+      d_model: ${model_hidden_dim}
+      d_head: 64
+      d_inner: ${model_filters}
+      kernel_size: 7
+
   semantic_layer:
     _target_: nemo.collections.tts.modules.acoustic_decoder_modules.SemanticInputLayer
     input_dim: ${semantic_codebook_dim}
@@ -128,7 +157,9 @@ model:
     transformer:
       _target_: nemo.collections.tts.modules.acoustic_decoder_transformer.AudioTransformer
       n_layer: 12
-      n_head: 8
+      n_head_self: 8
+      n_head_context: 8
+      n_head_text: 1
       d_model: ${model_hidden_dim}
       d_inner: ${model_filters}
       d_head: 64
@@ -142,11 +173,34 @@ model:
     fft:
       _target_: nemo.collections.tts.modules.acoustic_decoder_transformer.AudioTransformer
       n_layer: 6
-      n_head: 8
+      n_head_self: 8
+      n_head_context: 8
+      n_head_text: 1
       d_model: ${model_hidden_dim}
       d_inner: ${model_filters}
       d_head: 64
       kernel_size: 7
+
+  aligner:
+    _target_: nemo.collections.tts.modules.acoustic_decoder_modules.Aligner
+    text_emb_dim: 256
+    alignment_encoder:
+      _target_: nemo.collections.tts.modules.aligner.AlignmentEncoder
+      n_mel_channels: ${codebook_dim}
+      n_text_channels: 256
+      dist_type: cosine
+      temperature: 20.0
+      n_att_channels: 128
+      n_mel_filters: 256
+
+  text_encoder:
+    _target_: nemo.collections.tts.modules.acoustic_decoder_transformer.TextEncoder
+    n_layer: 6
+    n_head: 8
+    d_model: ${model_hidden_dim}
+    d_head: 64
+    d_inner: ${model_filters}
+    kernel_size: 7
 
   optim:
     name: adamw

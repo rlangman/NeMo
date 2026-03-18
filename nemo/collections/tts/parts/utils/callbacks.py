@@ -837,170 +837,21 @@ class AcousticDecoderArtifactGenerator(ArtifactGenerator):
 
         audio_tokens = batch_dict.get("audio_tokens")
         audio_token_lens = batch_dict.get("audio_token_lens")
-
-        with torch.no_grad():
-            semantic_tokens = audio_tokens[:, :1, :]
-            audio_tokens_pred = model.infer(
-                semantic_tokens=semantic_tokens,
-                semantic_lens=audio_token_lens,
-                num_audio_iters=self.num_audio_iters,
-                num_audio_denoise_iters=self.num_audio_denoise_iters,
-                audio_topk=self.audio_topk,
-                audio_temperature=self.audio_temperature,
-            )
-
-        if self.log_audio:
-            with torch.no_grad():
-                # [B, T_audio]
-                audio_pred, audio_pred_lens = audio_codec.decode(tokens=audio_tokens_pred, tokens_len=audio_token_lens)
-
-            for i, (dataset_name, audio_id) in enumerate(zip(dataset_names, audio_ids)):
-                audio_pred_path = Path(f"{dataset_name}/{audio_id}.wav")
-                audio_pred_i = audio_pred[i][: audio_pred_lens[i]].cpu().numpy()
-                audio_artifact = AudioArtifact(
-                    id=f"audio_{audio_id}",
-                    data=audio_pred_i,
-                    filepath=audio_pred_path,
-                    sample_rate=audio_codec.output_sample_rate,
-                )
-                audio_artifacts.append(audio_artifact)
-
-        return audio_artifacts
-
-    def generate_artifacts(
-        self, model: LightningModule, batch_dict: Dict, initial_log: bool = False
-    ) -> Tuple[List[AudioArtifact], List[ImageArtifact]]:
-
-        is_train = model.training
-        model = model.eval()
-
-        audio_codec = self.audio_codec.to(model.device).eval()
-
-        dataset_names = batch_dict.get("dataset_names")
-        audio_filepaths = batch_dict.get("audio_filepaths")
-        audio_ids = [create_id(p) for p in audio_filepaths]
-
-        image_artifacts = []
-
-        if initial_log:
-            audio_artifacts = self._create_ground_truth_artifacts(
-                audio_codec=audio_codec, batch_dict=batch_dict, dataset_names=dataset_names, audio_ids=audio_ids
-            )
-        else:
-            if self.log_audio:
-                audio_artifacts = self._generate_predictions(
-                    audio_codec=audio_codec,
-                    model=model,
-                    batch_dict=batch_dict,
-                    dataset_names=dataset_names,
-                    audio_ids=audio_ids,
-                )
-            else:
-                audio_artifacts = []
-
-        if is_train:
-            model.train()
-
-        return audio_artifacts, image_artifacts
-
-
-class AcousticDecoderWithTextArtifactGenerator(ArtifactGenerator):
-    """
-    Generator for logging AcousticDecoder model outputs.
-
-    Args:
-    """
-
-    def __init__(
-        self,
-        audio_codec_name,
-        audio_codec_path,
-        audio_codec_type: str = "audio_codec",
-        log_audio: bool = False,
-        log_semantic: bool = False,
-        num_audio_iters: int = 1,
-        num_audio_denoise_iters: int = 0,
-        audio_topk: int = 1,
-        audio_temperature: float = 1.0,
-        max_context_len: int = 50,
-    ) -> None:
-        self.log_audio = log_audio
-        self.log_semantic = log_semantic
-        self.num_audio_iters = num_audio_iters
-        self.num_audio_denoise_iters = num_audio_denoise_iters
-        self.audio_topk = audio_topk
-        self.audio_temperature = audio_temperature
-        self.max_context_len = max_context_len
-        self.audio_codec = _load_vocoder(
-            model_name=audio_codec_name,
-            checkpoint_path=audio_codec_path,
-            type=audio_codec_type,
-            strict=False,
-        )
-
-    def _create_ground_truth_artifacts(
-        self, audio_codec: LightningModule, dataset_names: List[str], audio_ids: List[str], batch_dict: Dict
-    ):
-        audio_artifacts = []
-        audio_tokens = batch_dict.get("audio_tokens")
-        audio_token_lens = batch_dict.get("audio_token_lens")
-
-        if self.log_audio:
-            with torch.no_grad():
-                audio, audio_lens = audio_codec.decode(tokens=audio_tokens, tokens_len=audio_token_lens)
-
-            for i, (dataset_name, audio_id) in enumerate(zip(dataset_names, audio_ids)):
-                audio_gt_path = Path(f"{dataset_name}/{audio_id}_gt.wav")
-                audio_gt_i = audio[i, : audio_lens[i]].cpu().numpy()
-                audio_artifact = AudioArtifact(
-                    id=f"audio_gt_{audio_id}",
-                    data=audio_gt_i,
-                    filepath=audio_gt_path,
-                    sample_rate=audio_codec.output_sample_rate,
-                )
-                audio_artifacts.append(audio_artifact)
-
-        if self.log_semantic:
-            with torch.no_grad():
-                semantic_tokens = audio_tokens[:, :1, :]
-                audio, audio_lens = audio_codec.semantic_codec.decode(
-                    tokens=semantic_tokens, tokens_len=audio_token_lens
-                )
-
-            for i, (dataset_name, audio_id) in enumerate(zip(dataset_names, audio_ids)):
-                audio_gt_path = Path(f"{dataset_name}/{audio_id}_gt_semantic.wav")
-                audio_gt_i = audio[i, : audio_lens[i]].cpu().numpy()
-                audio_artifact = AudioArtifact(
-                    id=f"audio_gt_semantic_{audio_id}",
-                    data=audio_gt_i,
-                    filepath=audio_gt_path,
-                    sample_rate=audio_codec.semantic_codec.output_sample_rate,
-                )
-                audio_artifacts.append(audio_artifact)
-
-        return audio_artifacts
-
-    def _generate_predictions(
-        self,
-        model: LightningModule,
-        audio_codec: LightningModule,
-        dataset_names: List[str],
-        audio_ids: List[str],
-        batch_dict: Dict,
-    ) -> List[AudioArtifact]:
-
-        audio_artifacts = []
-
-        audio_tokens = batch_dict.get("audio_tokens")
-        audio_token_lens = batch_dict.get("audio_token_lens")
         text = batch_dict.get("text")
         text_lens = batch_dict.get("text_lens")
 
         with torch.no_grad():
+            context, context_lens = model.get_context(
+                audio_tokens=audio_tokens,
+                audio_lens=audio_token_lens,
+                max_len=self.max_context_len,
+            )
             semantic_tokens = audio_tokens[:, :1, :]
             audio_tokens_pred = model.infer(
                 semantic_tokens=semantic_tokens,
                 semantic_lens=audio_token_lens,
+                context=context,
+                context_lens=context_lens,
                 text=text,
                 text_lens=text_lens,
                 num_audio_iters=self.num_audio_iters,
@@ -1197,9 +1048,14 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
                 token_list, max_lens=[token_max_len], pad_value=acoustic_decoder.text_tokenizer.pad
             ).to(acoustic_decoder.device)
 
+            acoustic_context, acoustic_context_lens = acoustic_decoder.get_context(
+                audio_tokens=audio_tokens, audio_lens=audio_token_lens
+            )
             audio_tokens_pred = acoustic_decoder.infer(
                 semantic_tokens=semantic_tokens_pred,
                 semantic_lens=audio_token_lens,
+                context=acoustic_context,
+                context_lens=acoustic_context_lens,
                 text=tokens,
                 text_lens=token_lens,
                 num_audio_iters=self.num_audio_iters,
@@ -1268,9 +1124,14 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
                 token_list, max_lens=[token_max_len], pad_value=acoustic_decoder.text_tokenizer.pad
             ).to(acoustic_decoder.device)
 
-            audio_tokens_pred = acoustic_decoder.infer(
+            acoustic_context, acoustic_context_lens = acoustic_decoder.get_context(
+                audio_tokens=audio_tokens, audio_lens=audio_token_lens
+            )
+            acoustic_tokens_pred = acoustic_decoder.infer(
                 semantic_tokens=semantic_tokens_pred,
                 semantic_lens=audio_token_lens,
+                context=acoustic_context,
+                context_lens=acoustic_context_lens,
                 text=tokens,
                 text_lens=token_lens,
                 num_audio_iters=self.num_audio_iters,
