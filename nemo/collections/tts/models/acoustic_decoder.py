@@ -24,9 +24,9 @@ from lightning.pytorch import Trainer
 
 from nemo.collections.tts.data.text_to_speech_dataset import create_text_to_speech_dataset
 from nemo.collections.tts.losses.acoustic_decoder_loss import AudioTokenLoss
+from nemo.collections.tts.modules.audio_codec_modules import VectorQuantizerIndexConverter
 from nemo.collections.tts.parts.utils.callbacks import LoggingCallback
 from nemo.collections.tts.parts.utils.helpers import get_mask_from_lengths
-from nemo.collections.tts.parts.utils.tts_dataset_utils import stack_tensors
 from nemo.core import ModelPT
 from nemo.core.classes.common import PretrainedModelInfo, typecheck
 from nemo.core.neural_types.elements import (
@@ -63,14 +63,29 @@ class AcousticDecoderModel(ModelPT):
         self.semantic_codebook_dim = cfg.get("semantic_codebook_dim")
         self.acoustic_codebook_num = cfg.get("acoustic_codebook_num")
         self.acoustic_codebook_dim = cfg.get("acoustic_codebook_dim")
-        self.vector_quantizer = instantiate(cfg.vector_quantizer)
-        self.vector_quantizer_acoustic = instantiate(cfg.vector_quantizer_acoustic)
-        self.vector_quantizer_semantic = instantiate(cfg.vector_quantizer_semantic)
 
         self.text_encoder = instantiate(cfg.text_encoder, n_embed=num_text_embed, padding_idx=self.text_pad_token)
         self.encoder = instantiate(cfg.encoder)
         self.decoder = instantiate(cfg.decoder)
         self.semantic_layer = instantiate(cfg.semantic_layer)
+
+        self.vector_quantizer = instantiate(cfg.vector_quantizer)
+
+        if "vector_quantizer_codec" in cfg:
+            vector_quantizer_codec = instantiate(cfg.vector_quantizer_codec)
+            self.vector_quantizer_converter_codec = VectorQuantizerIndexConverter(
+                vector_quantizer_original=vector_quantizer_codec,
+                vector_quantizer_new=self.vector_quantizer,
+            )
+
+        if "vector_quantizer_acoustic" in cfg:
+            self.vector_quantizer_acoustic = instantiate(cfg.vector_quantizer_acoustic)
+            self.vector_quantizer_converter_acoustic = VectorQuantizerIndexConverter(
+                vector_quantizer_original=self.vector_quantizer,
+                vector_quantizer_new=self.vector_quantizer_acoustic,
+            )
+        else:
+            self.vector_quantizer_acoustic = self.vector_quantizer
 
         # Infilling hyperparameters
         self.audio_infill_min = cfg.get("audio_infill_min", 0.05)
@@ -150,6 +165,7 @@ class AcousticDecoderModel(ModelPT):
             "text_lens": NeuralType(tuple('B'), LengthsType()),
         },
         output_types={
+            "acoustic_tokens": NeuralType(('B', 'C', 'T_audio'), TokenIndex()),
             "audio_tokens_pred": NeuralType(('B', 'C', 'T_audio'), TokenIndex()),
             "audio_logits": NeuralType(('B', 'C', 'W', 'T_audio'), LogitsType()),
             "audio_tokens_pred_post": NeuralType(('B', 'C', 'T_audio'), TokenIndex()),
@@ -157,6 +173,17 @@ class AcousticDecoderModel(ModelPT):
         }
     )
     def forward(self, audio_tokens, audio_token_lens, text, text_lens):
+        if self.vector_quantizer_converter_codec is not None:
+            audio_tokens = self.vector_quantizer_converter_codec.convert_original_to_new(
+                audio_tokens=audio_tokens, audio_lens=audio_token_lens
+            )
+
+        acoustic_tokens = audio_tokens[:, self.semantic_codebook_num:, :]
+        if self.vector_quantizer_converter_acoustic is not None:
+            acoustic_tokens = self.vector_quantizer_converter_acoustic.convert_original_to_new(
+                audio_tokens=acoustic_tokens, audio_lens=audio_token_lens
+            )
+
         audio_tokens_rearrange = rearrange(audio_tokens, 'B C T -> C B T')
         # [batch_size, code_dim, audio_token_len]
         audio_codes = self.vector_quantizer.decode(indices=audio_tokens_rearrange, input_len=audio_token_lens).detach()
@@ -207,6 +234,7 @@ class AcousticDecoderModel(ModelPT):
         )
 
         return (
+            acoustic_tokens,
             audio_tokens_pred,
             audio_logits,
             audio_tokens_pred_post,
@@ -220,6 +248,7 @@ class AcousticDecoderModel(ModelPT):
         audio_token_lens = batch_dict.get("audio_token_lens")
 
         (
+            acoustic_tokens,
             _,
             audio_token_logits,
             _,
@@ -227,8 +256,6 @@ class AcousticDecoderModel(ModelPT):
         ) = self(audio_tokens=audio_tokens, audio_token_lens=audio_token_lens, text=text, text_lens=text_lens)
 
         audio_mask = get_mask_from_lengths(audio_token_lens)
-        acoustic_tokens = audio_tokens[:, self.semantic_codebook_num:, :]
-
         audio_token_loss = self.audio_token_loss_fn(
             logits=audio_token_logits, target_tokens=acoustic_tokens, mask=audio_mask
         )
@@ -256,6 +283,7 @@ class AcousticDecoderModel(ModelPT):
         audio_token_lens = batch_dict.get("audio_token_lens")
 
         (
+            acoustic_tokens,
             audio_tokens_pred,
             audio_token_logits,
             audio_tokens_pred_post,
@@ -263,7 +291,6 @@ class AcousticDecoderModel(ModelPT):
         ) = self(audio_tokens=audio_tokens, audio_token_lens=audio_token_lens, text=text, text_lens=text_lens)
 
         audio_mask = get_mask_from_lengths(audio_token_lens)
-        acoustic_tokens = audio_tokens[:, self.semantic_codebook_num:, :]
         num_audio_tokens = max(1, audio_token_lens.sum() * self.acoustic_codebook_num)
 
         audio_token_loss = self.audio_token_loss_fn(
@@ -357,6 +384,7 @@ class AcousticDecoderModel(ModelPT):
 
     def _audio_token_infer(
         self,
+        semantic_tokens,
         inputs,
         audio_lens,
         text_enc,
@@ -440,6 +468,18 @@ class AcousticDecoderModel(ModelPT):
 
         audio_tokens = rearrange(audio_tokens, 'B T C -> B C T')
 
+        if self.vector_quantizer_converter_acoustic is not None:
+            audio_tokens = self.vector_quantizer_converter_acoustic.convert_new_to_original(
+                audio_tokens=audio_tokens, audio_lens=audio_lens
+            )
+
+        audio_tokens = torch.concat([semantic_tokens, audio_tokens], dim=1)
+
+        if self.vector_quantizer_converter_codec is not None:
+            audio_tokens = self.vector_quantizer_converter_codec.convert_new_to_original(
+                audio_tokens=audio_tokens, audio_lens=audio_lens
+            )
+
         return audio_tokens
 
     @typecheck(
@@ -475,7 +515,7 @@ class AcousticDecoderModel(ModelPT):
 
         semantic_tokens_rearrange = rearrange(semantic_tokens, 'B C T -> C B T')
         # [batch_size, code_dim, audio_token_len]
-        semantic_codes = self.vector_quantizer_semantic.decode(indices=semantic_tokens_rearrange, input_len=semantic_lens)
+        semantic_codes = self.vector_quantizer.decode(indices=semantic_tokens_rearrange, input_len=semantic_lens)
 
         semantic_codes = rearrange(semantic_codes, 'B C T -> B T C')
         encoder_input = self.semantic_layer(semantic_codes=semantic_codes, audio_mask=audio_mask)
@@ -487,6 +527,7 @@ class AcousticDecoderModel(ModelPT):
         )
         # [B, C_acoustic, T]
         audio_tokens = self._audio_token_infer(
+            semantic_tokens=semantic_tokens,
             inputs=encoded,
             audio_lens=semantic_lens,
             text_enc=text_enc,

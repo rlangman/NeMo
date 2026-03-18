@@ -23,6 +23,7 @@ from hydra.utils import instantiate
 from lightning.pytorch import Trainer
 from omegaconf import DictConfig, OmegaConf, open_dict
 
+from nemo.collections.tts.data.vocoder_dataset import create_vocoder_dataset
 from nemo.collections.tts.losses.audio_codec_loss import (
     FeatureMatchingLoss,
     MultiResolutionMelLoss,
@@ -33,13 +34,19 @@ from nemo.collections.tts.losses.audio_codec_loss import (
 )
 from nemo.collections.tts.modules.audio_codec_modules import ResNetSpeakerEncoder, default_precision
 from nemo.collections.tts.modules.common import GaussianDropout
-from nemo.collections.tts.data.vocoder_dataset import create_vocoder_dataset
 from nemo.collections.tts.parts.utils.callbacks import LoggingCallback
 from nemo.collections.tts.parts.utils.helpers import get_batch_size, get_num_workers
 from nemo.collections.tts.parts.utils.tts_dataset_utils import resample_batch
 from nemo.core import ModelPT
 from nemo.core.classes.common import PretrainedModelInfo, typecheck
-from nemo.core.neural_types.elements import AudioSignal, EncodedRepresentation, IntType, LengthsType, Optional, TokenIndex
+from nemo.core.neural_types.elements import (
+    AudioSignal,
+    EncodedRepresentation,
+    IntType,
+    LengthsType,
+    Optional,
+    TokenIndex,
+)
 from nemo.core.neural_types.neural_type import NeuralType
 from nemo.core.optim.lr_scheduler import compute_max_steps, prepare_lr_scheduler
 from nemo.utils import logging, model_utils
@@ -155,15 +162,9 @@ class AudioCodecModel(ModelPT):
             semantic_codec = None
 
         if semantic_codec is not None:
-            self.register_nemo_submodule(name="semantic_codec", config_field="semantic_codec", model=semantic_codec)
-            if semantic_codec.use_slm_loss:
-                del self.semantic_codec.slm_encoder
-
-            if semantic_codec.use_asr_loss:
-                del self.semantic_codec.asr_encoder
-
             self.semantic_codec.eval()
             self.semantic_codec.freeze()
+            self.register_nemo_submodule(name="semantic_codec", config_field="semantic_codec", model=semantic_codec)
         else:
             self.semantic_codec = None
 
@@ -337,8 +338,9 @@ class AudioCodecModel(ModelPT):
             "encoded_len": NeuralType(tuple('B'), LengthsType()),
         },
     )
-    def encode_audio(self, audio: torch.Tensor, audio_len: torch.Tensor, sample_rate: Optional[int] = None) \
-        -> Tuple[torch.Tensor, torch.Tensor]:
+    def encode_audio(
+        self, audio: torch.Tensor, audio_len: torch.Tensor, sample_rate: Optional[int] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Apply encoder on the input audio signal. Input will be padded with zeros so
         the last frame has full `self.samples_per_frame` samples.
 
@@ -352,7 +354,9 @@ class AudioCodecModel(ModelPT):
         if not sample_rate:
             sample_rate = self.sample_rate
 
-        audio_preprocessed, audio_preprocessed_len = self.preprocess_audio(audio=audio, audio_len=audio_len, sample_rate=sample_rate)
+        audio_preprocessed, audio_preprocessed_len = self.preprocess_audio(
+            audio=audio, audio_len=audio_len, sample_rate=sample_rate
+        )
         encoded, encoded_len = self.audio_encoder(audio=audio_preprocessed, audio_len=audio_preprocessed_len)
 
         if self.semantic_codec is not None:
@@ -453,7 +457,9 @@ class AudioCodecModel(ModelPT):
             "tokens_len": NeuralType(tuple('B'), LengthsType()),
         },
     )
-    def encode(self, audio: torch.Tensor, audio_len: torch.Tensor, sample_rate: Optional[int]=None) -> Tuple[torch.Tensor, torch.Tensor]:
+    def encode(
+        self, audio: torch.Tensor, audio_len: torch.Tensor, sample_rate: Optional[int] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Convert input time-domain audio signal into a discrete representation (tokens).
 
         Args:
@@ -510,7 +516,9 @@ class AudioCodecModel(ModelPT):
             "output_audio_len": NeuralType(tuple('B'), LengthsType()),
         },
     )
-    def forward(self, audio: torch.Tensor, audio_len: torch.Tensor, sample_rate: Optional[int]=None) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self, audio: torch.Tensor, audio_len: torch.Tensor, sample_rate: Optional[int] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Apply encoder, quantizer, decoder on the input time-domain signal.
 
         Args:
@@ -629,7 +637,9 @@ class AudioCodecModel(ModelPT):
     def training_step(self, batch, batch_idx):
         optim_gen, optim_disc = self.optimizers()
 
-        audio, audio_len, audio_gen, commit_loss, codes, ssl_emb, ssl_emb_pred, asr_emb, asr_emb_pred = self._process_batch(batch)
+        audio, audio_len, audio_gen, commit_loss, codes, ssl_emb, ssl_emb_pred, asr_emb, asr_emb_pred = (
+            self._process_batch(batch)
+        )
 
         metrics = {
             "global_step": self.global_step,
@@ -806,7 +816,7 @@ class AudioCodecModel(ModelPT):
             global_rank=self.trainer.global_rank,
             world_size=self.trainer.world_size,
             dataset_args=dataset_config.dataset_args,
-            is_train=True
+            is_train=True,
         )
         sampler = dataset.get_sampler(batch_size=dataloader_params.batch_size, world_size=self.trainer.world_size)
         data_loader = torch.utils.data.DataLoader(
@@ -816,9 +826,7 @@ class AudioCodecModel(ModelPT):
 
     def _setup_test_dataloader(self, dataset_config, dataloader_params):
         dataset = create_vocoder_dataset(
-            dataset_type=dataset_config.dataset_type,
-            dataset_args=dataset_config.dataset_args,
-            is_train=False
+            dataset_type=dataset_config.dataset_type, dataset_args=dataset_config.dataset_args, is_train=False
         )
         data_loader = torch.utils.data.DataLoader(dataset, collate_fn=dataset.collate_fn, **dataloader_params)
         return data_loader
