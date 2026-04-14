@@ -637,6 +637,136 @@ class AudioEncoderWithText(NeuralModule):
         return audio_enc
 
 
+class AudioTransformerWithContext(NeuralModule):
+    def __init__(
+        self,
+        n_layer,
+        n_head_self,
+        n_head_context,
+        n_head_text,
+        d_model,
+        d_head,
+        d_inner,
+        kernel_size=None,
+        dropout=0.1,
+        dropout_self_att=0.1,
+        dropout_context_att=0.1,
+    ):
+        super(AudioTransformerWithContext, self).__init__()
+        self.d_model = d_model
+        self.transformer_layers = nn.ModuleList(
+            [
+                TransformerMultiCrossAttentionLayer(
+                    n_head_self=n_head_self,
+                    n_head_cross1=n_head_context,
+                    n_head_cross2=n_head_text,
+                    d_model=d_model,
+                    d_head=d_head,
+                    d_inner=d_inner,
+                    kernel_size=kernel_size,
+                    dropout=dropout,
+                    dropout_self_att=dropout_self_att,
+                    dropout_cross_att=dropout_context_att,
+                )
+                for _ in range(n_layer)
+            ]
+        )
+
+    @property
+    def input_types(self):
+        return {
+            "inputs": NeuralType(('B', 'T_audio', 'D'), EncodedRepresentation()),
+            "audio_mask": NeuralType(('B', 'T_input'), MaskType()),
+            "context": NeuralType(('B', 'T_context', 'D'), EncodedRepresentation()),
+            "context_mask": NeuralType(('B', 'T_context'), MaskType()),
+            "text_enc": NeuralType(('B', 'T_text', 'D'), EncodedRepresentation()),
+            "text_mask": NeuralType(('B', 'T_text'), MaskType()),
+        }
+
+    @property
+    def output_types(self):
+        return {
+            "out": NeuralType(('B', 'T', 'D'), EncodedRepresentation()),
+        }
+
+    def forward(self, inputs, audio_mask, context, context_mask, text_enc, text_mask):
+        audio_mask_3d = rearrange(audio_mask, 'B T_audio -> B T_audio 1')
+        text_mask_3d = rearrange(text_mask, 'B T_text -> B 1 T_text')
+        context_mask_3d = rearrange(context_mask, 'B T_context -> B 1 T_context')
+
+        max_context_len = context.shape[1]
+        # [B, T_audio, T_context]
+        context_attn_mask = audio_mask_3d.repeat([1, 1, max_context_len])
+        context_attn_mask = context_attn_mask * context_mask_3d
+
+        max_text_len = text_enc.shape[1]
+        # [B, T_audio, T_context]
+        text_attn_mask = audio_mask_3d.repeat([1, 1, max_text_len])
+        text_attn_mask = text_attn_mask * text_mask_3d
+
+        out = inputs
+        for layer in self.transformer_layers:
+            out = layer(
+                inputs=out,
+                mask=audio_mask,
+                encoded1=context,
+                attn_mask1=context_attn_mask,
+                encoded2=text_enc,
+                attn_mask2=text_attn_mask,
+            )
+
+        out = out * audio_mask_3d
+
+        return out
+
+
+class AudioEncoderWithContext(NeuralModule):
+    def __init__(self, input_dim, transformer):
+        super(AudioEncoderWithContext, self).__init__()
+
+        audio_hidden_dim = transformer.d_model
+        self.input_layer = torch.nn.Linear(input_dim, audio_hidden_dim)
+        self.positional_embedding = PositionalEmbedding(audio_hidden_dim)
+        self.transformer = transformer
+
+    @property
+    def input_types(self):
+        return {
+            "inputs": NeuralType(('B', 'T_audio', 'D'), EncodedRepresentation()),
+            "audio_mask": NeuralType(('B', 'T_audio'), MaskType()),
+            "context": NeuralType(('B', 'T_context', 'D'), EncodedRepresentation()),
+            "context_mask": NeuralType(('B', 'T_context'), MaskType()),
+            "text_enc": NeuralType(('B', 'T_text', 'D'), EncodedRepresentation()),
+            "text_mask": NeuralType(('B', 'T_text'), MaskType()),
+        }
+
+    @property
+    def output_types(self):
+        return {
+            "audio_enc": NeuralType(('B', 'T', 'D'), EncodedRepresentation()),
+        }
+
+    def forward(self, inputs, audio_mask, context, context_mask, text_enc, text_mask):
+        audio_enc = self.input_layer(inputs)
+
+        max_audio_len = audio_mask.shape[1]
+        pos_seq = torch.arange(max_audio_len, device=audio_enc.device).to(audio_enc.dtype)
+        pos_emb = self.positional_embedding(pos_seq)
+
+        audio_enc = audio_enc + pos_emb
+        audio_enc = audio_enc * rearrange(audio_mask, 'B T -> B T 1')
+        audio_enc = self.transformer(
+            inputs=audio_enc,
+            audio_mask=audio_mask,
+            context=context,
+            context_mask=context_mask,
+            text_enc=text_enc,
+            text_mask=text_mask,
+        )
+
+        return audio_enc
+
+
 class TextEncoder(NeuralModule):
     def __init__(
         self,

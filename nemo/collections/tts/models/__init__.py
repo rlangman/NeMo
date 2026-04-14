@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from nemo.collections.tts.models.acoustic_decoder import AcousticDecoderModel
+from nemo.collections.tts.models.acoustic_decoder_with_context import AcousticDecoderWithContextModel
 from nemo.collections.tts.models.acoustic_decoder_with_text import AcousticDecoderWithTextModel
 from nemo.collections.tts.models.aligner import AlignerModel
 from nemo.collections.tts.models.audio_codec import AudioCodecModel

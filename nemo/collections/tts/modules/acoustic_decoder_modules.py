@@ -122,6 +122,39 @@ class SemanticInputLayer(NeuralModule):
         return out
 
 
+class ContextEncoder(NeuralModule):
+
+    def __init__(self, input_dim, encoder):
+        super(ContextEncoder, self).__init__()
+        d_model = encoder.d_model
+        self.pre_conv = Conv1d(in_channels=input_dim, out_channels=d_model)
+        self.encoder = encoder
+
+    @property
+    def input_types(self):
+        return {
+            "audio_codes": NeuralType(('B', 'C', 'T_audio'), EncodedRepresentation()),
+            "audio_lens": NeuralType(tuple('B'), LengthsType()),
+        }
+
+    @property
+    def output_types(self):
+        return {
+            "context": NeuralType(('B', 'D', 'T'), EncodedRepresentation()),
+        }
+
+    @typecheck()
+    def forward(self, audio_codes, audio_lens):
+        mask = get_mask_from_lengths(audio_lens)
+        context = self.pre_conv(inputs=audio_codes, mask=mask)
+
+        context = rearrange(context, 'B D T -> B T D')
+        context = self.encoder(inputs=context, mask=mask)
+        context = rearrange(context, 'B T D -> B D T')
+
+        return context
+
+
 class AudioDecoder(NeuralModule):
 
     def __init__(self, fft, num_codebooks, codebook_size, codebook_dim):
@@ -281,6 +314,132 @@ class AudioDecoderWithText(NeuralModule):
 
         dec_input = dec_input * audio_mask_3d
         dec_out = self.fft(inputs=dec_input, audio_mask=audio_mask, text_enc=text_enc, text_mask=text_mask)
+
+        # [batch_size, audio_len, num_codebook * codebook_size]
+        dec_out = self.layer_norm(dec_out)
+        audio_logits = self.audio_token_layer(dec_out)
+        audio_logits = audio_logits * audio_mask_3d
+
+        # [batch_size, audio_len, num_codebook, codebook_size]
+        logit_shape = (audio_logits.shape[0], audio_logits.shape[1], self.num_codebooks, self.codebook_size)
+
+        audio_logits = torch.reshape(audio_logits, logit_shape)
+        # [batch_size, audio_len, num_codebook]
+        if temperature is None:
+            audio_tokens = audio_logits.max(dim=3).indices
+        else:
+            audio_tokens = sample_tokens(logits=audio_logits, temperature=temperature, topk=topk)
+
+        audio_tokens = audio_tokens * audio_mask_3d
+
+        audio_logits = rearrange(audio_logits, 'B T C W -> B C W T')
+        audio_tokens = rearrange(audio_tokens, 'B T C -> B C T')
+
+        return audio_tokens, audio_logits
+
+    def forward_parallel(self, inputs, audio_mask, temperature=None, topk=None):
+        audio_mask_3d = rearrange(audio_mask, 'B T -> B T 1')
+
+        # [batch_size, audio_len, num_codebook * codebook_size]
+        out = self.layer_norm_parallel(inputs)
+        audio_logits = self.audio_token_layer_parallel(out)
+        audio_logits = audio_logits * audio_mask_3d
+
+        # [batch_size, audio_len, num_codebook, codebook_size]
+        logit_shape = (audio_logits.shape[0], audio_logits.shape[1], self.num_codebooks, self.codebook_size)
+        audio_logits = torch.reshape(audio_logits, logit_shape)
+
+        # [batch_size, audio_len, num_codebook]
+        if temperature is None:
+            audio_tokens = audio_logits.max(dim=3).indices
+        else:
+            audio_tokens = sample_tokens(logits=audio_logits, temperature=temperature, topk=topk)
+
+        audio_tokens = audio_tokens * audio_mask_3d
+
+        audio_logits = rearrange(audio_logits, 'B T C W -> B C W T')
+        audio_tokens = rearrange(audio_tokens, 'B T C -> B C T')
+
+        return audio_tokens, audio_logits
+
+
+class AudioDecoderWithContext(NeuralModule):
+
+    def __init__(self, fft, num_codebooks, codebook_size, codebook_dim):
+        super(AudioDecoderWithContext, self).__init__()
+        self.d_model = fft.d_model
+        self.num_codebooks = num_codebooks
+        self.codebook_size = codebook_size
+        self.codebook_dim = codebook_dim
+        self.num_logits = self.num_codebooks * self.codebook_size
+
+        self.audio_mask_emb = torch.nn.Parameter(torch.zeros([1, 1, self.d_model]))
+        self.fft = fft
+
+        self.audio_hidden_layer = torch.nn.Linear(codebook_dim, self.d_model)
+        self.audio_cond_layer = torch.nn.Linear(self.d_model, self.d_model)
+
+        self.layer_norm = torch.nn.LayerNorm(self.d_model)
+        self.audio_token_layer = torch.nn.Linear(self.d_model, self.num_logits)
+        self.layer_norm_parallel = torch.nn.LayerNorm(self.d_model)
+        self.audio_token_layer_parallel = torch.nn.Linear(self.d_model, self.num_logits)
+
+    @property
+    def input_types(self):
+        return {
+            "inputs": NeuralType(('B', 'T_audio', 'D'), EncodedRepresentation()),
+            "audio_mask": NeuralType(('B', 'T_audio'), MaskType()),
+            "context": NeuralType(('B', 'T_context', 'D'), EncodedRepresentation()),
+            "context_mask": NeuralType(('B', 'T_context'), MaskType()),
+            "text_enc": NeuralType(('B', 'T_text', 'D'), EncodedRepresentation()),
+            "text_mask": NeuralType(('B', 'T_text'), MaskType()),
+            "audio_codes": NeuralType(('B', 'T_audio', 'C'), EncodedRepresentation()),
+            "audio_maskin": NeuralType(('B', 'T_audio'), MaskType()),
+            "temperature": NeuralType((), FloatType(), optional=True),
+            "topk": NeuralType((), IntType(), optional=True),
+        }
+
+    @property
+    def output_types(self):
+        return {
+            "audio_tokens": NeuralType(('B', 'C', 'T_audio'), TokenIndex()),
+            "audio_logits": NeuralType(('B', 'C', 'W', 'T_audio'), LogitsType()),
+        }
+
+    @typecheck()
+    def forward(
+        self,
+        inputs,
+        audio_mask,
+        context,
+        context_mask,
+        text_enc,
+        text_mask,
+        audio_codes,
+        audio_maskin,
+        temperature=None,
+        topk=None,
+    ):
+        audio_mask_3d = rearrange(audio_mask, 'B T -> B T 1')
+
+        audio_res = self.audio_hidden_layer(audio_codes)
+        audio_res = self.audio_cond_layer(audio_res)
+        audio_res = audio_res * rearrange(audio_maskin, 'B T -> B T 1')
+
+        masked_mask = ~audio_maskin * audio_mask
+        mask_res = self.audio_mask_emb * rearrange(masked_mask, 'B T -> B T 1')
+
+        dec_input = inputs + audio_res + mask_res
+
+        dec_input = dec_input * audio_mask_3d
+        dec_out = self.fft(
+            inputs=dec_input,
+            audio_mask=audio_mask,
+            context=context,
+            context_mask=context_mask,
+            text_enc=text_enc,
+            text_mask=text_mask,
+        )
 
         # [batch_size, audio_len, num_codebook * codebook_size]
         dec_out = self.layer_norm(dec_out)

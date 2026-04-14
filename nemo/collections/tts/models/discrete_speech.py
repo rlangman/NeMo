@@ -124,11 +124,11 @@ class DiscreteSpeechModel(ModelPT):
         else:
             self.context_aligner_encoder = None
 
-            # Aligner definition
+        # Aligner definition
         self.phoneme_aligner = instantiate(cfg.aligner, num_text_emb=num_text_embed)
 
         if self.text_down_sample_rate == 1:
-            self.multiphone_aligner = self.phoneme_aligner
+            self.multiphone_aligner = None
         elif self.text_down_sample_rate > 1:
             self.multiphone_aligner = instantiate(
                 cfg.aligner,
@@ -735,13 +735,20 @@ class DiscreteSpeechModel(ModelPT):
         speaking_rate, speaking_rate_indices = self.get_speaking_rate(text_lens=text_lens, durs=durs)
         speaking_rate = speaking_rate.detach()
 
-        dur_sample, dur_lens, balign_hard, balign_soft, balign_logits = self.multiphone_aligner(
-            text=text_sample,
-            text_lens=text_sample_lens,
-            audio_codes=audio_codes_sample,
-            audio_lens=audio_token_sample_lens,
-            context_emb=context_aligner_emb,
-        )
+        if self.multiphone_aligner is not None:
+            dur_sample, dur_lens, balign_hard, balign_soft, balign_logits = self.multiphone_aligner(
+                text=text_sample,
+                text_lens=text_sample_lens,
+                audio_codes=audio_codes_sample,
+                audio_lens=audio_token_sample_lens,
+                context_emb=context_aligner_emb,
+            )
+        else:
+            dur_lens = text_sample_lens
+            balign_hard = None
+            balign_soft = None
+            balign_logits = None
+
         dur_indices = self.duration_to_index(durs=dur_sample, lengths=dur_lens)
 
         if sample_context:
@@ -895,13 +902,16 @@ class DiscreteSpeechModel(ModelPT):
             audio_lens=context_lens,
         )
 
-        durs, _, _, balign_soft, _ = self.multiphone_aligner(
-            text=text,
-            text_lens=text_lens,
-            audio_codes=audio_codes,
-            audio_lens=audio_token_lens,
-            context_emb=context_aligner_emb,
-        )
+        if self.multiphone_aligner is not None:
+            durs, _, _, balign_soft, _ = self.multiphone_aligner(
+                text=text,
+                text_lens=text_lens,
+                audio_codes=audio_codes,
+                audio_lens=audio_token_lens,
+                context_emb=context_aligner_emb,
+            )
+        else:
+            balign_soft = None
 
         # [batch_size, context_len]
         context_mask = get_mask_from_lengths(context_lens)
@@ -999,11 +1009,6 @@ class DiscreteSpeechModel(ModelPT):
         ctc_loss = self.forward_sum_loss_fn(attn_logprob=align_logits, in_lens=text_lens, out_lens=audio_token_lens)
         train_ctc_loss = self.aligner_ctc_loss_scale * ctc_loss
 
-        ctc_multiphone_loss = self.forward_sum_loss_fn(
-            attn_logprob=balign_logits, in_lens=dur_lens, out_lens=audio_token_sample_lens
-        )
-        train_ctc_multiphone_loss = self.aligner_ctc_loss_scale * ctc_multiphone_loss
-
         if self.current_epoch < self.bin_loss_start_epoch:
             bin_loss_weight = 0.0
         elif self.current_epoch >= self.bin_loss_warmup_epochs:
@@ -1016,9 +1021,6 @@ class DiscreteSpeechModel(ModelPT):
         bin_loss = self.bin_loss_fn(hard_attention=align_hard, soft_attention=align_soft)
         train_bin_loss = bin_loss_weight * self.aligner_bin_loss_scale * bin_loss
 
-        bin_multiphone_loss = self.bin_loss_fn(hard_attention=balign_hard, soft_attention=balign_soft)
-        train_bin_multiphone_loss = bin_loss_weight * self.aligner_bin_loss_scale * bin_multiphone_loss
-
         loss = (
             train_semantic_token_loss
             + train_semantic_token_post_loss
@@ -1027,8 +1029,6 @@ class DiscreteSpeechModel(ModelPT):
             + train_speaking_rate_loss
             + train_ctc_loss
             + train_bin_loss
-            + train_ctc_multiphone_loss
-            + train_bin_multiphone_loss
         )
 
         metrics = {
@@ -1038,10 +1038,23 @@ class DiscreteSpeechModel(ModelPT):
             "t_duration_post_loss": duration_post_loss,
             "t_speaking_rate_loss": speaking_rate_loss,
             "t_ctc_loss": ctc_loss,
-            "t_ctc_multiphone_loss": ctc_multiphone_loss,
             "t_bin_loss": bin_loss,
-            "t_bin_multiphone_loss": bin_multiphone_loss,
         }
+
+        if balign_logits is not None:
+            ctc_multiphone_loss = self.forward_sum_loss_fn(
+                attn_logprob=balign_logits, in_lens=dur_lens, out_lens=audio_token_sample_lens
+            )
+            train_ctc_multiphone_loss = self.aligner_ctc_loss_scale * ctc_multiphone_loss
+
+            bin_multiphone_loss = self.bin_loss_fn(hard_attention=balign_hard, soft_attention=balign_soft)
+            train_bin_multiphone_loss = bin_loss_weight * self.aligner_bin_loss_scale * bin_multiphone_loss
+
+            loss += train_ctc_multiphone_loss + train_bin_multiphone_loss
+
+            metrics['t_ctc_multiphone_loss'] = ctc_multiphone_loss
+            metrics['t_bin_multiphone_loss'] = bin_multiphone_loss
+
         self.log_dict(metrics, on_step=True, sync_dist=True)
         self.log("t_loss", semantic_token_loss, prog_bar=True, logger=False, sync_dist=True)
 
