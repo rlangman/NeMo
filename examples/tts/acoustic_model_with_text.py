@@ -14,7 +14,7 @@
 
 import lightning.pytorch as pl
 
-from nemo.collections.tts.models import AcousticDecoderWithTextModel
+from nemo.collections.tts.models import AcousticModelWithText
 from nemo.core.config import hydra_runner
 from nemo.utils.exp_manager import exp_manager
 
@@ -23,7 +23,7 @@ from nemo.utils.exp_manager import exp_manager
 def main(cfg):
     trainer = pl.Trainer(**cfg.trainer)
     exp_manager(trainer, cfg.get("exp_manager", None))
-    model = AcousticDecoderWithTextModel(cfg=cfg.model, trainer=trainer)
+    model = AcousticModelWithText(cfg=cfg.model, trainer=trainer)
     model.maybe_init_from_pretrained_checkpoint(cfg=cfg)
     trainer.fit(model)
 

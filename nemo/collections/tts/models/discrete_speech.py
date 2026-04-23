@@ -24,7 +24,7 @@ from omegaconf import DictConfig
 
 from nemo.collections.common.parts.utils import mask_sequence_tensor
 from nemo.collections.tts.data.text_to_speech_dataset import create_text_to_speech_dataset
-from nemo.collections.tts.losses.acoustic_decoder_loss import AudioTokenLoss, MaskedSoftmax
+from nemo.collections.tts.losses.acoustic_model_loss import AudioTokenLoss, MaskedSoftmax
 from nemo.collections.tts.losses.aligner_loss import BinLoss, ForwardSumLoss
 from nemo.collections.tts.losses.discrete_speech_loss import SpeakingRateLoss
 from nemo.collections.tts.modules.audio_codec_modules import VectorQuantizerIndexConverter

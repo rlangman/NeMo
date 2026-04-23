@@ -23,7 +23,7 @@ from lightning.pytorch import Trainer
 from omegaconf import DictConfig
 
 from nemo.collections.tts.data.text_to_speech_dataset import create_text_to_speech_dataset
-from nemo.collections.tts.losses.acoustic_decoder_loss import AudioTokenLoss
+from nemo.collections.tts.losses.acoustic_model_loss import AudioTokenLoss
 from nemo.collections.tts.modules.audio_codec_modules import VectorQuantizerIndexConverter
 from nemo.collections.tts.parts.utils.callbacks import LoggingCallback
 from nemo.collections.tts.parts.utils.helpers import get_mask_from_lengths
@@ -36,7 +36,7 @@ from nemo.utils.decorators import experimental
 
 
 @experimental
-class AcousticDecoderWithTextModel(ModelPT):
+class AcousticModelWithText(ModelPT):
 
     def __init__(self, cfg: DictConfig, trainer: Trainer = None):
         # Convert to Hydra 1.0 compatible DictConfig

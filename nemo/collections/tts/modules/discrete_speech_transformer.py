@@ -15,11 +15,11 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
-
 from einops import rearrange
+
+from nemo.collections.tts.modules.acoustic_model_modules import TextDownSampling
+from nemo.collections.tts.modules.acoustic_model_transformer import TransformerCrossAttentionLayer, TransformerLayer
 from nemo.collections.tts.modules.transformer import PositionalEmbedding
-from nemo.collections.tts.modules.acoustic_decoder_modules import TextDownSampling
-from nemo.collections.tts.modules.acoustic_decoder_transformer import TransformerLayer, TransformerCrossAttentionLayer
 from nemo.collections.tts.parts.utils.helpers import get_mask_from_lengths
 from nemo.core.classes import NeuralModule, typecheck
 from nemo.core.neural_types.elements import EncodedRepresentation, LengthsType, MaskType
@@ -52,18 +52,20 @@ class TextEncoder(NeuralModule):
         self.word_emb = nn.Embedding(n_embed, d_model, padding_idx=padding_idx)
         self.pos_emb = PositionalEmbedding(self.d_model)
         self.context_cond_layer = torch.nn.Linear(d_context, self.d_model)
-        self.text_layers = nn.ModuleList([
-            TransformerLayer(
-                n_head,
-                d_model,
-                d_head,
-                d_inner,
-                kernel_size,
-                dropout,
-                dropatt=dropout_att,
-            )
-            for _ in range(n_layer)
-        ])
+        self.text_layers = nn.ModuleList(
+            [
+                TransformerLayer(
+                    n_head,
+                    d_model,
+                    d_head,
+                    d_inner,
+                    kernel_size,
+                    dropout,
+                    dropatt=dropout_att,
+                )
+                for _ in range(n_layer)
+            ]
+        )
         if down_sample_rate and down_sample_rate > 1:
             self.downsample_layer = TextDownSampling(
                 input_dim=d_model,
@@ -142,21 +144,23 @@ class DurationTransformer(NeuralModule):
     ):
         super(DurationTransformer, self).__init__()
         self.d_model = d_model
-        self.transformer_layers = nn.ModuleList([
-            TransformerCrossAttentionLayer(
-                n_head_self=n_head_self,
-                n_head_cross=n_head_context,
-                d_model=d_model,
-                d_encoded=d_context,
-                d_head=d_head,
-                d_inner=d_inner,
-                kernel_size=kernel_size,
-                dropout=dropout,
-                dropout_self_att=dropout_self_att,
-                dropout_cross_att=dropout_context_att,
-            )
-            for _ in range(n_layer)
-        ])
+        self.transformer_layers = nn.ModuleList(
+            [
+                TransformerCrossAttentionLayer(
+                    n_head_self=n_head_self,
+                    n_head_cross=n_head_context,
+                    d_model=d_model,
+                    d_encoded=d_context,
+                    d_head=d_head,
+                    d_inner=d_inner,
+                    kernel_size=kernel_size,
+                    dropout=dropout,
+                    dropout_self_att=dropout_self_att,
+                    dropout_cross_att=dropout_context_att,
+                )
+                for _ in range(n_layer)
+            ]
+        )
 
     @property
     def input_types(self):
@@ -183,12 +187,7 @@ class DurationTransformer(NeuralModule):
 
         out = inputs
         for layer in self.transformer_layers:
-            out = layer(
-                inputs=out,
-                mask=text_mask,
-                encoded=context,
-                attn_mask=context_attn_mask
-            )
+            out = layer(inputs=out, mask=text_mask, encoded=context, attn_mask=context_attn_mask)
 
         out = out * text_mask_3d
 
@@ -204,7 +203,6 @@ class DurationEncoder(NeuralModule):
         self.speaking_rate_cond_layer = torch.nn.Linear(1, hidden_dim)
         self.transformer = transformer
 
-
     @property
     def input_types(self):
         return {
@@ -217,7 +215,6 @@ class DurationEncoder(NeuralModule):
     def output_types(self):
         return {
             "out": NeuralType(('B', 'T', 'D'), EncodedRepresentation()),
-
         }
 
     def forward(self, text_enc, text_mask, speaking_rate, context, context_mask):
@@ -229,9 +226,7 @@ class DurationEncoder(NeuralModule):
         dur_enc = dur_enc + sr_res
         dur_enc = dur_enc * rearrange(text_mask, 'B T -> B T 1')
 
-        dur_enc = self.transformer(
-            inputs=dur_enc, text_mask=text_mask, context=context, context_mask=context_mask
-        )
+        dur_enc = self.transformer(inputs=dur_enc, text_mask=text_mask, context=context, context_mask=context_mask)
 
         return dur_enc
 
@@ -253,21 +248,23 @@ class AudioTransformer(NeuralModule):
     ):
         super(AudioTransformer, self).__init__()
         self.d_model = d_model
-        self.transformer_layers = nn.ModuleList([
-            TransformerCrossAttentionLayer(
-                n_head_self=n_head_self,
-                n_head_cross=n_head_context,
-                d_model=d_model,
-                d_encoded=d_context,
-                d_head=d_head,
-                d_inner=d_inner,
-                kernel_size=kernel_size,
-                dropout=dropout,
-                dropout_self_att=dropout_self_att,
-                dropout_cross_att=dropout_context_att,
-            )
-            for _ in range(n_layer)
-        ])
+        self.transformer_layers = nn.ModuleList(
+            [
+                TransformerCrossAttentionLayer(
+                    n_head_self=n_head_self,
+                    n_head_cross=n_head_context,
+                    d_model=d_model,
+                    d_encoded=d_context,
+                    d_head=d_head,
+                    d_inner=d_inner,
+                    kernel_size=kernel_size,
+                    dropout=dropout,
+                    dropout_self_att=dropout_self_att,
+                    dropout_cross_att=dropout_context_att,
+                )
+                for _ in range(n_layer)
+            ]
+        )
 
     @property
     def input_types(self):
@@ -282,7 +279,6 @@ class AudioTransformer(NeuralModule):
     def output_types(self):
         return {
             "out": NeuralType(('B', 'T', 'D'), EncodedRepresentation()),
-
         }
 
     def forward(self, inputs, audio_mask, context, context_mask):
@@ -295,12 +291,7 @@ class AudioTransformer(NeuralModule):
 
         out = inputs
         for layer in self.transformer_layers:
-            out = layer(
-                inputs=out,
-                mask=audio_mask,
-                encoded=context,
-                attn_mask=context_attn_mask
-            )
+            out = layer(inputs=out, mask=audio_mask, encoded=context, attn_mask=context_attn_mask)
 
         out = out * audio_mask_3d
 

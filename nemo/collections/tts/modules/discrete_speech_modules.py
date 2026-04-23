@@ -15,7 +15,7 @@
 import torch
 from einops import rearrange
 
-from nemo.collections.tts.modules.acoustic_decoder_modules import sample_tokens, Conv1d
+from nemo.collections.tts.modules.acoustic_model_modules import Conv1d, sample_tokens
 from nemo.collections.tts.parts.utils.helpers import get_mask_from_lengths
 from nemo.core.classes import NeuralModule, typecheck
 from nemo.core.neural_types.elements import (
@@ -41,10 +41,7 @@ class ContextEmbeddingEncoder(NeuralModule):
     ):
         super(ContextEmbeddingEncoder, self).__init__()
         d_model = encoder.d_model
-        self.pre_conv = Conv1d(
-            in_channels=input_dim,
-            out_channels=d_model
-        )
+        self.pre_conv = Conv1d(in_channels=input_dim, out_channels=d_model)
         self.encoder = encoder
         self.rnn = torch.nn.LSTM(input_size=d_model, hidden_size=rnn_dim, num_layers=rnn_layers, batch_first=True)
         self.emb_layer = torch.nn.Linear(in_features=rnn_dim, out_features=d_model)
@@ -70,7 +67,9 @@ class ContextEmbeddingEncoder(NeuralModule):
         context = rearrange(context, 'B D T -> B T D')
         context = self.encoder(inputs=context, mask=mask)
 
-        out = torch.nn.utils.rnn.pack_padded_sequence(context, audio_lens.cpu(), batch_first=True, enforce_sorted=False)
+        out = torch.nn.utils.rnn.pack_padded_sequence(
+            context, audio_lens.cpu(), batch_first=True, enforce_sorted=False
+        )
         out, _ = self.rnn(out)
         out, padded_lens = torch.nn.utils.rnn.pad_packed_sequence(out, batch_first=True)
         # [B, D]
@@ -91,15 +90,13 @@ class SpeakingRatePredictor(NeuralModule):
 
     @property
     def input_types(self):
-        return {
-            "context_emb": NeuralType(('B', 'D'), EncodedRepresentation())
-        }
+        return {"context_emb": NeuralType(('B', 'D'), EncodedRepresentation())}
 
     @property
     def output_types(self):
         return {
             "speaking_rate_indices_pred": NeuralType(tuple('B'), TokenIndex()),
-            "speaking_rate_logits": NeuralType(('B', 'C'), LogitsType())
+            "speaking_rate_logits": NeuralType(('B', 'C'), LogitsType()),
         }
 
     @typecheck()
@@ -263,8 +260,8 @@ class AudioDecoder(NeuralModule):
         self.audio_mask_emb = torch.nn.Parameter(torch.zeros([1, 1, self.d_model]))
         self.fft = fft
 
-        self.audio_hidden_layer = torch.nn.Linear(codebook_dim, self.d_model )
-        self.audio_cond_layer = torch.nn.Linear(self.d_model , self.d_model )
+        self.audio_hidden_layer = torch.nn.Linear(codebook_dim, self.d_model)
+        self.audio_cond_layer = torch.nn.Linear(self.d_model, self.d_model)
 
         self.layer_norm = torch.nn.LayerNorm(self.d_model)
         self.audio_token_layer = torch.nn.Linear(self.d_model, self.num_logits)

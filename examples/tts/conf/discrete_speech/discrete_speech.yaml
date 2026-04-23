@@ -4,13 +4,13 @@
 
 name: DiscreteSpeech
 
-batch_size: ???
+batch_size: 1350
 
 max_epochs: ???
 
 feature_name: ???
 audio_codec_path: ???
-acoustic_decoder_path: ???
+acoustic_model_path: ???
 
 train_ds_type: ???
 train_ds_meta: ???
@@ -22,12 +22,12 @@ heteronyms_path: ???
 
 log_dir: ???
 
-codebook_num: 22
+codebook_num: 10
 codebook_levels: [4, 4, 4, 4]
-codebook_dim: 88
+codebook_dim: 40
 codebook_size: 256
 
-codebook_num_codec: 11
+codebook_num_codec: 5
 codebook_levels_codec: [4, 4, 4, 4, 4, 4, 4, 4]
 
 semantic_codebook_num: 1
@@ -62,7 +62,6 @@ audio_filters: 2048
 model:
   text_down_sample_rate: 2
   space_dur: 3
-  inference_phoneme_probability: 1.0
 
   context_min_len: ${context_min_len}
   context_max_len: ${context_max_len}
@@ -146,7 +145,8 @@ model:
     generators:
       - _target_: nemo.collections.tts.parts.utils.callbacks.DiscreteSpeechArtifactGenerator
         audio_codec_path: ${audio_codec_path}
-        acoustic_decoder_path: ${acoustic_decoder_path}
+        acoustic_model_path: ${acoustic_model_path}
+        use_acoustic_context: false
         log_audio: true
         log_audio_gta: false
         log_alignment: false
@@ -166,7 +166,7 @@ model:
       num_workers: 1
 
   aligner:
-    _target_: nemo.collections.tts.modules.acoustic_decoder_modules.Aligner
+    _target_: nemo.collections.tts.modules.acoustic_model_modules.Aligner
     text_emb_dim: 256
     alignment_encoder:
       _target_: nemo.collections.tts.modules.aligner.AlignmentEncoder
@@ -183,7 +183,7 @@ model:
     rnn_layers: 2
     rnn_dim: 512
     encoder:
-      _target_: nemo.collections.tts.modules.acoustic_decoder_transformer.ContextTransformer
+      _target_: nemo.collections.tts.modules.acoustic_model_transformer.ContextTransformer
       n_layer: 6
       n_head: 8
       d_model: ${context_hidden_dim}

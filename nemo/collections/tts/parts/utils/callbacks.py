@@ -748,9 +748,9 @@ class FastPitchArtifactGenerator(ArtifactGenerator):
         return audio_artifacts, image_artifacts
 
 
-class AcousticDecoderArtifactGenerator(ArtifactGenerator):
+class AcousticModelArtifactGenerator(ArtifactGenerator):
     """
-    Generator for logging AcousticDecoder model outputs.
+    Generator for logging AcousticModel outputs.
 
     Args:
     """
@@ -902,9 +902,9 @@ class AcousticDecoderArtifactGenerator(ArtifactGenerator):
         return audio_artifacts, image_artifacts
 
 
-class AcousticDecoderWithTextArtifactGenerator(ArtifactGenerator):
+class AcousticModelWithTextArtifactGenerator(ArtifactGenerator):
     """
-    Generator for logging AcousticDecoder model outputs.
+    Generator for logging AcousticModel outputs.
 
     Args:
     """
@@ -1060,9 +1060,9 @@ class AcousticDecoderWithTextArtifactGenerator(ArtifactGenerator):
         return audio_artifacts, image_artifacts
 
 
-class AcousticDecoderWithContextArtifactGenerator(ArtifactGenerator):
+class AcousticModelWithContextArtifactGenerator(ArtifactGenerator):
     """
-    Generator for logging AcousticDecoder model outputs.
+    Generator for logging AcousticModel outputs.
 
     Args:
     """
@@ -1241,7 +1241,7 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
     def __init__(
         self,
         audio_codec_path,
-        acoustic_decoder_path,
+        acoustic_model_path,
         audio_codec_name: Optional[str] = None,
         audio_codec_type: str = "audio_codec",
         log_audio: bool = False,
@@ -1257,6 +1257,7 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
         duration_temperature: float = 1.0,
         silence_pad_start: int = None,
         silence_pad_end: int = None,
+        use_acoustic_context=False,
     ) -> None:
         self.log_audio = log_audio
         self.log_audio_gta = log_audio_gta
@@ -1277,9 +1278,15 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
             type=audio_codec_type,
             strict=False,
         )
-        from nemo.collections.tts.models import AcousticDecoderModel
+        self.use_acoustic_context = use_acoustic_context
+        if not self.use_acoustic_context:
+            from nemo.collections.tts.models import AcousticModelWithText
 
-        self.acoustic_decoder = AcousticDecoderModel.restore_from(acoustic_decoder_path)
+            self.acoustic_model = AcousticModelWithText.restore_from(acoustic_model_path)
+        else:
+            from nemo.collections.tts.models import AcousticModelWithContext
+
+            self.acoustic_model = AcousticModelWithContext.restore_from(acoustic_model_path)
 
     def _create_ground_truth_artifacts(
         self, audio_codec: LightningModule, dataset_names: List[str], audio_ids: List[str], batch_dict: Dict
@@ -1310,7 +1317,7 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
         self,
         model: LightningModule,
         audio_codec: LightningModule,
-        acoustic_decoder: LightningModule,
+        acoustic_model: LightningModule,
         dataset_names: List[str],
         audio_ids: List[str],
         batch_dict: Dict,
@@ -1350,26 +1357,43 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
             token_list = []
             token_len_list = []
             for text_str in text_strings:
-                tokens = acoustic_decoder.parse(text_str)[0]
+                tokens = acoustic_model.parse(text_str)[0]
                 token_len = tokens.shape[0]
                 token_list.append(tokens)
                 token_len_list.append(token_len)
-            token_lens = torch.tensor(token_len_list, dtype=torch.int32, device=acoustic_decoder.device)
+            token_lens = torch.tensor(token_len_list, dtype=torch.int32, device=acoustic_model.device)
             token_max_len = int(token_lens.max().item())
             tokens = stack_tensors(
-                token_list, max_lens=[token_max_len], pad_value=acoustic_decoder.text_tokenizer.pad
-            ).to(acoustic_decoder.device)
+                token_list, max_lens=[token_max_len], pad_value=acoustic_model.text_tokenizer.pad
+            ).to(acoustic_model.device)
 
-            audio_tokens_pred = acoustic_decoder.infer(
-                semantic_tokens=semantic_tokens_pred,
-                semantic_lens=audio_token_lens,
-                text=tokens,
-                text_lens=token_lens,
-                num_audio_iters=self.num_audio_iters,
-                num_audio_denoise_iters=self.num_audio_denoise_iters,
-                audio_topk=self.audio_topk,
-                audio_temperature=self.audio_temperature,
-            )
+            if not self.use_acoustic_context:
+                audio_tokens_pred = acoustic_model.infer(
+                    semantic_tokens=semantic_tokens_pred,
+                    semantic_lens=audio_token_lens,
+                    text=tokens,
+                    text_lens=token_lens,
+                    num_audio_iters=self.num_audio_iters,
+                    num_audio_denoise_iters=self.num_audio_denoise_iters,
+                    audio_topk=self.audio_topk,
+                    audio_temperature=self.audio_temperature,
+                )
+            else:
+                acoustic_context, acoustic_context_lens = acoustic_model.get_context(
+                    audio_tokens=audio_tokens, audio_lens=audio_token_lens
+                )
+                audio_tokens_pred = acoustic_model.infer(
+                    semantic_tokens=semantic_tokens_pred,
+                    semantic_lens=audio_token_lens,
+                    context=acoustic_context,
+                    context_lens=acoustic_context_lens,
+                    text=tokens,
+                    text_lens=token_lens,
+                    num_audio_iters=self.num_audio_iters,
+                    num_audio_denoise_iters=self.num_audio_denoise_iters,
+                    audio_topk=self.audio_topk,
+                    audio_temperature=self.audio_temperature,
+                )
 
         if self.log_audio:
             with torch.no_grad():
@@ -1393,7 +1417,7 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
         self,
         model: LightningModule,
         audio_codec: LightningModule,
-        acoustic_decoder: LightningModule,
+        acoustic_model: LightningModule,
         dataset_names: List[str],
         audio_ids: List[str],
         batch_dict: Dict,
@@ -1421,17 +1445,17 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
             token_list = []
             token_len_list = []
             for text_str in text_strings:
-                tokens = acoustic_decoder.parse(text_str)[0]
+                tokens = acoustic_model.parse(text_str)[0]
                 token_len = tokens.shape[0]
                 token_list.append(tokens)
                 token_len_list.append(token_len)
-            token_lens = torch.tensor(token_len_list, dtype=torch.int32, device=acoustic_decoder.device)
+            token_lens = torch.tensor(token_len_list, dtype=torch.int32, device=acoustic_model.device)
             token_max_len = int(token_lens.max().item())
             tokens = stack_tensors(
-                token_list, max_lens=[token_max_len], pad_value=acoustic_decoder.text_tokenizer.pad
-            ).to(acoustic_decoder.device)
+                token_list, max_lens=[token_max_len], pad_value=acoustic_model.text_tokenizer.pad
+            ).to(acoustic_model.device)
 
-            audio_tokens_pred = acoustic_decoder.infer(
+            audio_tokens_pred = acoustic_model.infer(
                 semantic_tokens=semantic_tokens_pred,
                 semantic_lens=audio_token_lens,
                 text=tokens,
@@ -1497,7 +1521,7 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
         model.eval()
 
         audio_codec = self.audio_codec.to(model.device).eval()
-        acoustic_decoder = self.acoustic_decoder.to(model.device).eval()
+        acoustic_model = self.acoustic_model.to(model.device).eval()
 
         dataset_names = batch_dict.get("dataset_names")
         audio_filepaths = batch_dict.get("audio_filepaths")
@@ -1514,7 +1538,7 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
             if self.log_audio_gta or self.log_alignment:
                 audio_gta_pred, alignments = self._generate_gta_predictions(
                     audio_codec=audio_codec,
-                    acoustic_decoder=acoustic_decoder,
+                    acoustic_model=acoustic_model,
                     model=model,
                     batch_dict=batch_dict,
                     dataset_names=dataset_names,
@@ -1529,7 +1553,7 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
             if self.log_audio:
                 audio_pred, dequantized_pred = self._generate_predictions(
                     audio_codec=audio_codec,
-                    acoustic_decoder=acoustic_decoder,
+                    acoustic_model=acoustic_model,
                     model=model,
                     batch_dict=batch_dict,
                     dataset_names=dataset_names,
