@@ -1257,7 +1257,7 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
         duration_temperature: float = 1.0,
         silence_pad_start: int = None,
         silence_pad_end: int = None,
-        use_acoustic_context=False,
+        acoustic_model_type="text",
     ) -> None:
         self.log_audio = log_audio
         self.log_audio_gta = log_audio_gta
@@ -1278,15 +1278,21 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
             type=audio_codec_type,
             strict=False,
         )
-        self.use_acoustic_context = use_acoustic_context
-        if not self.use_acoustic_context:
+        self.acoustic_model_type = acoustic_model_type
+        if self.acoustic_model_type == "default":
+            from nemo.collections.tts.models import AcousticModel
+
+            self.acoustic_model = AcousticModel.restore_from(acoustic_model_path)
+        elif self.acoustic_model_type == "text":
             from nemo.collections.tts.models import AcousticModelWithText
 
             self.acoustic_model = AcousticModelWithText.restore_from(acoustic_model_path)
-        else:
+        elif self.acoustic_model_type == "context":
             from nemo.collections.tts.models import AcousticModelWithContext
 
             self.acoustic_model = AcousticModelWithContext.restore_from(acoustic_model_path)
+        else:
+            raise ValueError(f"Unknown acoustic model type {self.acoustic_model_type}")
 
     def _create_ground_truth_artifacts(
         self, audio_codec: LightningModule, dataset_names: List[str], audio_ids: List[str], batch_dict: Dict
@@ -1354,46 +1360,57 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
                 silence_pad_end=self.silence_pad_end,
             )
 
-            token_list = []
-            token_len_list = []
-            for text_str in text_strings:
-                tokens = acoustic_model.parse(text_str)[0]
-                token_len = tokens.shape[0]
-                token_list.append(tokens)
-                token_len_list.append(token_len)
-            token_lens = torch.tensor(token_len_list, dtype=torch.int32, device=acoustic_model.device)
-            token_max_len = int(token_lens.max().item())
-            tokens = stack_tensors(
-                token_list, max_lens=[token_max_len], pad_value=acoustic_model.text_tokenizer.pad
-            ).to(acoustic_model.device)
-
-            if not self.use_acoustic_context:
+            if self.acoustic_model_type == "default":
                 audio_tokens_pred = acoustic_model.infer(
                     semantic_tokens=semantic_tokens_pred,
                     semantic_lens=audio_token_lens,
-                    text=tokens,
-                    text_lens=token_lens,
                     num_audio_iters=self.num_audio_iters,
                     num_audio_denoise_iters=self.num_audio_denoise_iters,
                     audio_topk=self.audio_topk,
                     audio_temperature=self.audio_temperature,
                 )
             else:
-                acoustic_context, acoustic_context_lens = acoustic_model.get_context(
-                    audio_tokens=audio_tokens, audio_lens=audio_token_lens
-                )
-                audio_tokens_pred = acoustic_model.infer(
-                    semantic_tokens=semantic_tokens_pred,
-                    semantic_lens=audio_token_lens,
-                    context=acoustic_context,
-                    context_lens=acoustic_context_lens,
-                    text=tokens,
-                    text_lens=token_lens,
-                    num_audio_iters=self.num_audio_iters,
-                    num_audio_denoise_iters=self.num_audio_denoise_iters,
-                    audio_topk=self.audio_topk,
-                    audio_temperature=self.audio_temperature,
-                )
+                token_list = []
+                token_len_list = []
+                for text_str in text_strings:
+                    tokens = acoustic_model.parse(text_str)[0]
+                    token_len = tokens.shape[0]
+                    token_list.append(tokens)
+                    token_len_list.append(token_len)
+                token_lens = torch.tensor(token_len_list, dtype=torch.int32, device=acoustic_model.device)
+                token_max_len = int(token_lens.max().item())
+                tokens = stack_tensors(
+                    token_list, max_lens=[token_max_len], pad_value=acoustic_model.text_tokenizer.pad
+                ).to(acoustic_model.device)
+                if self.acoustic_model_type == "text":
+                    audio_tokens_pred = acoustic_model.infer(
+                        semantic_tokens=semantic_tokens_pred,
+                        semantic_lens=audio_token_lens,
+                        text=tokens,
+                        text_lens=token_lens,
+                        num_audio_iters=self.num_audio_iters,
+                        num_audio_denoise_iters=self.num_audio_denoise_iters,
+                        audio_topk=self.audio_topk,
+                        audio_temperature=self.audio_temperature,
+                    )
+                elif self.acoustic_model_type == "context":
+                    acoustic_context, acoustic_context_lens = acoustic_model.get_context(
+                        audio_tokens=audio_tokens, audio_lens=audio_token_lens
+                    )
+                    audio_tokens_pred = acoustic_model.infer(
+                        semantic_tokens=semantic_tokens_pred,
+                        semantic_lens=audio_token_lens,
+                        context=acoustic_context,
+                        context_lens=acoustic_context_lens,
+                        text=tokens,
+                        text_lens=token_lens,
+                        num_audio_iters=self.num_audio_iters,
+                        num_audio_denoise_iters=self.num_audio_denoise_iters,
+                        audio_topk=self.audio_topk,
+                        audio_temperature=self.audio_temperature,
+                    )
+                else:
+                    raise ValueError(f"Unknown acoustic model type {self.acoustic_model_type}")
 
         if self.log_audio:
             with torch.no_grad():

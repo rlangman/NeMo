@@ -96,7 +96,7 @@ class DiscreteSpeechModel(ModelPT):
 
         self.speaking_rate_quantizer = instantiate(cfg.speaking_rate_quantizer)
 
-        self.text_down_sample_rate = cfg.get("text_down_sample_rate")
+        self.text_down_sample_rate = cfg.get("text_down_sample_rate", 1)
         self.space_dur = cfg.get("space_dur", 1)
 
         # Encoder, decoder definitions
