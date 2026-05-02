@@ -1310,8 +1310,6 @@ class DiscreteSpeechModel(ModelPT):
                 audio_tokens_i, audio_logits = self.decoder(
                     inputs=inputs,
                     audio_mask=audio_mask,
-                    context=context,
-                    context_mask=context_mask,
                     audio_codes=audio_codes,
                     audio_maskin=audio_maskin,
                     temperature=temperature,
@@ -1387,8 +1385,6 @@ class DiscreteSpeechModel(ModelPT):
                     dur_indices=dur_indices,
                     text_mask=text_mask,
                     duration_maskin=duration_maskin,
-                    context=context,
-                    context_mask=context_mask,
                     temperature=temperature,
                     topk=topk,
                 )
@@ -1498,8 +1494,6 @@ class DiscreteSpeechModel(ModelPT):
             dur_indices=dur_indices,
             text_mask=dur_mask,
             duration_maskin=duration_maskin,
-            context=context,
-            context_mask=context_mask,
         )
 
         text_enc_repeated, _ = regulate_len(durs, text_enc, pace=1.0)
@@ -1515,8 +1509,6 @@ class DiscreteSpeechModel(ModelPT):
         semantic_tokens_pred_post, semantic_logits_post = self.decoder(
             inputs=semantic_enc,
             audio_mask=audio_mask,
-            context=context,
-            context_mask=context_mask,
             audio_codes=semantic_codes,
             audio_maskin=semantic_maskin,
         )
@@ -1564,7 +1556,7 @@ class DiscreteSpeechModel(ModelPT):
         context_emb,
         context,
         context_lens,
-        word_stride=1,
+        word_stride=3,
         audio_topk=None,
         audio_temperature=None,
         num_duration_iters=1,

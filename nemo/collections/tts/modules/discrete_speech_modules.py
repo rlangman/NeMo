@@ -135,8 +135,6 @@ class DurationDecoder(NeuralModule):
             "dur_indices": NeuralType(('B', 'T_text'), TokenIndex()),
             "text_mask": NeuralType(('B', 'T_text'), MaskType()),
             "duration_maskin": NeuralType(('B', 'T_text'), MaskType()),
-            "context": NeuralType(('B', 'T_context', 'D'), EncodedRepresentation()),
-            "context_mask": NeuralType(('B', 'T_context'), MaskType()),
             "temperature": NeuralType((), FloatType(), optional=True),
             "topk": NeuralType((), IntType(), optional=True),
         }
@@ -149,9 +147,7 @@ class DurationDecoder(NeuralModule):
         }
 
     @typecheck()
-    def forward(
-        self, inputs, dur_indices, text_mask, duration_maskin, context, context_mask, temperature=None, topk=None
-    ):
+    def forward(self, inputs, dur_indices, text_mask, duration_maskin, temperature=None, topk=None):
         text_mask_3d = rearrange(text_mask, 'B T -> B T 1')
 
         log_dur = torch.log(dur_indices + 1.0).detach()
@@ -167,7 +163,7 @@ class DurationDecoder(NeuralModule):
 
         # [B, T, D]
         dec_input = dec_input * rearrange(text_mask, 'B T -> B T 1')
-        dec_out = self.fft(inputs=dec_input, text_mask=text_mask, context=context, context_mask=context_mask)
+        dec_out = self.fft(inputs=dec_input, text_mask=text_mask)
 
         # [B, T, num_codes]
         dec_out = self.layer_norm(dec_out)
@@ -273,8 +269,6 @@ class AudioDecoder(NeuralModule):
         return {
             "inputs": NeuralType(('B', 'T_audio', 'D'), EncodedRepresentation()),
             "audio_mask": NeuralType(('B', 'T_audio'), MaskType()),
-            "context": NeuralType(('B', 'T_context', 'D'), EncodedRepresentation()),
-            "context_mask": NeuralType(('B', 'T_context'), MaskType()),
             "audio_codes": NeuralType(('B', 'T_audio', 'C'), EncodedRepresentation()),
             "audio_maskin": NeuralType(('B', 'T_audio'), MaskType()),
             "temperature": NeuralType((), FloatType(), optional=True),
@@ -289,9 +283,7 @@ class AudioDecoder(NeuralModule):
         }
 
     @typecheck()
-    def forward(
-        self, inputs, audio_mask, context, context_mask, audio_codes, audio_maskin, temperature=None, topk=None
-    ):
+    def forward(self, inputs, audio_mask, audio_codes, audio_maskin, temperature=None, topk=None):
         audio_mask_3d = rearrange(audio_mask, 'B T -> B T 1')
 
         audio_res = self.audio_hidden_layer(audio_codes)
@@ -304,7 +296,7 @@ class AudioDecoder(NeuralModule):
         dec_input = inputs + audio_res + mask_res
 
         dec_input = dec_input * audio_mask_3d
-        dec_out = self.fft(inputs=dec_input, audio_mask=audio_mask, context=context, context_mask=context_mask)
+        dec_out = self.fft(inputs=dec_input, audio_mask=audio_mask)
 
         # [batch_size, audio_len, num_codebook * codebook_size]
         dec_out = self.layer_norm(dec_out)

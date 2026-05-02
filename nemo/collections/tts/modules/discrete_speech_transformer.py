@@ -194,6 +194,60 @@ class DurationTransformer(NeuralModule):
         return out
 
 
+class DurationTransformerWithoutCond(NeuralModule):
+    def __init__(
+        self,
+        n_layer,
+        n_head,
+        d_model,
+        d_head,
+        d_inner,
+        kernel_size=None,
+        dropout=0.1,
+        dropout_att=0.1,
+    ):
+        super(DurationTransformerWithoutCond, self).__init__()
+        self.d_model = d_model
+        self.transformer_layers = nn.ModuleList(
+            [
+                TransformerLayer(
+                    n_head=n_head,
+                    d_model=d_model,
+                    d_head=d_head,
+                    d_inner=d_inner,
+                    kernel_size=kernel_size,
+                    dropout=dropout,
+                    dropatt=dropout_att,
+                )
+                for _ in range(n_layer)
+            ]
+        )
+
+    @property
+    def input_types(self):
+        return {
+            "input": NeuralType(('B', 'T_audio', 'D'), EncodedRepresentation()),
+            "text_mask": NeuralType(('B', 'T_input'), MaskType()),
+        }
+
+    @property
+    def output_types(self):
+        return {
+            "out": NeuralType(('B', 'T', 'D'), EncodedRepresentation()),
+        }
+
+    def forward(self, inputs, text_mask):
+        text_mask_3d = rearrange(text_mask, 'B T_text -> B T_text 1')
+
+        out = inputs
+        for layer in self.transformer_layers:
+            out = layer(inputs=out, mask=text_mask)
+
+        out = out * text_mask_3d
+
+        return out
+
+
 class DurationEncoder(NeuralModule):
     def __init__(self, input_dim, transformer):
         super(DurationEncoder, self).__init__()
@@ -292,6 +346,60 @@ class AudioTransformer(NeuralModule):
         out = inputs
         for layer in self.transformer_layers:
             out = layer(inputs=out, mask=audio_mask, encoded=context, attn_mask=context_attn_mask)
+
+        out = out * audio_mask_3d
+
+        return out
+
+
+class AudioTransformerWithoutCond(NeuralModule):
+    def __init__(
+        self,
+        n_layer,
+        n_head,
+        d_model,
+        d_head,
+        d_inner,
+        kernel_size=None,
+        dropout=0.1,
+        dropout_att=0.1,
+    ):
+        super(AudioTransformerWithoutCond, self).__init__()
+        self.d_model = d_model
+        self.transformer_layers = nn.ModuleList(
+            [
+                TransformerLayer(
+                    n_head=n_head,
+                    d_model=d_model,
+                    d_head=d_head,
+                    d_inner=d_inner,
+                    kernel_size=kernel_size,
+                    dropout=dropout,
+                    dropatt=dropout_att,
+                )
+                for _ in range(n_layer)
+            ]
+        )
+
+    @property
+    def input_types(self):
+        return {
+            "inputs": NeuralType(('B', 'T_audio', 'D'), EncodedRepresentation()),
+            "audio_mask": NeuralType(('B', 'T_input'), MaskType()),
+        }
+
+    @property
+    def output_types(self):
+        return {
+            "out": NeuralType(('B', 'T', 'D'), EncodedRepresentation()),
+        }
+
+    def forward(self, inputs, audio_mask):
+        audio_mask_3d = rearrange(audio_mask, 'B T_audio -> B T_audio 1')
+
+        out = inputs
+        for layer in self.transformer_layers:
+            out = layer(inputs=out, mask=audio_mask)
 
         out = out * audio_mask_3d
 
