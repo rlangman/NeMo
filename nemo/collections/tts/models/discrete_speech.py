@@ -157,8 +157,13 @@ class DiscreteSpeechModel(ModelPT):
             concentration1=1.0, concentration0=duration_infill_beta
         )
 
+        self.encoder_mask_min = cfg.get("encoder_mask_min", 0.0)
+        self.encoder_mask_max = cfg.get("encoder_mask_max", 0.3)
+        encoder_mask_beta = cfg.get("encoder_mask_beta", 2.0)
+        self.encoder_mask_dist = torch.distributions.beta.Beta(concentration1=1.0, concentration0=encoder_mask_beta)
+
         # Rate at which noise is added to ground truth alignment seen by the decoder
-        self.decoder_duration_noise_percent = cfg.get("decoder_duration_noise_percent", 0.2)
+        self.decoder_duration_noise_percent = cfg.get("decoder_duration_noise_percent", 0.0)
 
         # Reconstruction losses
         self.audio_token_loss_scale = cfg.get("audio_token_loss_scale", 1.0)
@@ -765,6 +770,12 @@ class DiscreteSpeechModel(ModelPT):
                 infill_max=self.duration_infill_max,
             )
             dur_noise = self._add_decoder_duration_noise(durs=dur_sample, text_lens=dur_lens)
+            encoder_mask, _ = self.create_infill_mask(
+                input_lens=audio_token_sample_lens,
+                dist=self.encoder_mask_dist,
+                infill_min=self.encoder_mask_min,
+                infill_max=self.encoder_mask_max,
+            )
         else:
             audio_mask = get_mask_from_lengths(audio_token_sample_lens)
             semantic_maskin = torch.zeros(
@@ -785,6 +796,8 @@ class DiscreteSpeechModel(ModelPT):
             duration_loss_mask = ~duration_maskin * dur_mask
 
             dur_noise = dur_sample
+
+            encoder_mask = torch.zeros_like(audio_mask)
 
         semantic_token_sample = audio_token_sample[:, : self.semantic_codebook_num, :]
         semantic_codes = audio_codes_sample[:, : self.semantic_codebook_dim, :]
@@ -813,6 +826,7 @@ class DiscreteSpeechModel(ModelPT):
             durs=dur_noise,
             dur_indices=dur_indices,
             duration_maskin=duration_maskin,
+            encoder_mask=encoder_mask,
         )
 
         return (
@@ -1560,6 +1574,7 @@ class DiscreteSpeechModel(ModelPT):
         durs,
         dur_indices,
         duration_maskin,
+        encoder_mask,
     ):
         audio_mask = get_mask_from_lengths(audio_lens)
         # [batch_size, context_len]
@@ -1589,7 +1604,11 @@ class DiscreteSpeechModel(ModelPT):
         text_enc_repeated, _ = regulate_len(durs, text_enc, pace=1.0)
 
         semantic_enc = self.encoder(
-            inputs=text_enc_repeated, audio_mask=audio_mask, context=context, context_mask=context_mask
+            inputs=text_enc_repeated,
+            audio_mask=audio_mask,
+            encoder_mask=encoder_mask,
+            context=context,
+            context_mask=context_mask,
         )
         semantic_tokens_pred, semantic_logits = self.decoder.forward_parallel(
             inputs=semantic_enc, audio_mask=audio_mask

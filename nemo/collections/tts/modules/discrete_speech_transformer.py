@@ -412,6 +412,7 @@ class AudioEncoder(NeuralModule):
 
         audio_hidden_dim = transformer.d_model
         self.input_layer = torch.nn.Linear(input_dim, audio_hidden_dim)
+        self.mask_emb = torch.nn.Parameter(torch.zeros([1, 1, audio_hidden_dim]))
         self.positional_embedding = PositionalEmbedding(audio_hidden_dim)
         self.transformer = transformer
 
@@ -422,6 +423,7 @@ class AudioEncoder(NeuralModule):
             "audio_mask": NeuralType(('B', 'T_audio'), MaskType()),
             "context": NeuralType(('B', 'T_context', 'D'), EncodedRepresentation()),
             "context_mask": NeuralType(('B', 'T_context'), MaskType()),
+            "encoder_mask": NeuralType(('B', 'T_audio'), MaskType(), optional=True),
         }
 
     @property
@@ -430,8 +432,12 @@ class AudioEncoder(NeuralModule):
             "audio_enc": NeuralType(('B', 'T', 'D'), EncodedRepresentation()),
         }
 
-    def forward(self, inputs, audio_mask, context, context_mask):
+    def forward(self, inputs, audio_mask, context, context_mask, encoder_mask=None):
         audio_enc = self.input_layer(inputs)
+
+        if encoder_mask is not None:
+            encoder_mask_3d = rearrange(encoder_mask, 'B T -> B T 1')
+            audio_enc = torch.where(encoder_mask_3d, self.mask_emb, audio_enc)
 
         max_audio_len = audio_mask.shape[1]
         pos_seq = torch.arange(max_audio_len, device=audio_enc.device).to(audio_enc.dtype)
