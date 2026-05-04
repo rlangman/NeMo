@@ -866,7 +866,7 @@ class DiscreteSpeechModel(ModelPT):
         text_lens,
         audio_tokens,
         audio_token_lens,
-        word_stride=1,
+        word_stride=2,
         audio_temperature=None,
         audio_topk=None,
     ):
@@ -1266,6 +1266,34 @@ class DiscreteSpeechModel(ModelPT):
 
         return word_starts, num_iters
 
+    def _find_word_starts_text(self, text, word_stride):
+        batch_size = text.shape[0]
+        max_text_len = text.shape[1]
+        # [B]
+        text_indices = torch.arange(1, max_text_len + 1, device=text.device)
+        # [B, T]
+        text_indices = text_indices.unsqueeze(0).tile([batch_size, 1])
+
+        # [B, T]
+        is_space = torch.logical_or(text == self.space_token, text == self.bos_token)
+        word_start_indices = torch.where(is_space, text_indices, torch.zeros_like(text_indices))
+
+        word_num = torch.cumsum(is_space, dim=1).long() - 1
+        word_mask = word_num % word_stride == 0
+        word_start_indices = torch.where(word_mask, word_start_indices, torch.zeros_like(word_mask))
+
+        word_starts = text_indices == word_start_indices
+
+        num_iters = 0
+        for i in range(batch_size):
+            indices = torch.nonzero(word_start_indices[i])
+            for j in range(1, indices.shape[0]):
+                word_dur = word_start_indices[i, indices[j]] - word_start_indices[i, indices[j - 1]]
+                if word_dur > num_iters:
+                    num_iters = word_dur
+
+        return word_starts, num_iters
+
     def _semantic_token_infer(
         self,
         inputs,
@@ -1340,6 +1368,68 @@ class DiscreteSpeechModel(ModelPT):
         return audio_tokens
 
     def _duration_infer(
+        self,
+        inputs,
+        text,
+        text_lens,
+        context,
+        context_mask,
+        word_stride,
+        temperature=None,
+        topk=None,
+        silence_pad_start=None,
+        silence_pad_end=None,
+    ):
+        # [B, T]
+        text_mask = get_mask_from_lengths(text_lens)
+
+        # [B, T]
+        maskin, num_iters = self._find_word_starts_text(text=text, word_stride=word_stride)
+
+        duration_maskin = torch.zeros_like(text_mask, dtype=torch.bool)
+        dur_indices = torch.zeros_like(text_mask, dtype=torch.int)
+
+        if silence_pad_start:
+            for i in range(dur_indices.shape[0]):
+                dur_indices[i, 0] = silence_pad_start - 1
+                duration_maskin[i, 0] = True
+
+        if silence_pad_end:
+            for i in range(dur_indices.shape[0]):
+                last_i = text_lens[i] - 1
+                dur_indices[i, last_i] = silence_pad_end - 1
+                duration_maskin[i, last_i] = True
+
+        for i in range(num_iters):
+            if i == 0:
+                # [B, C, T], [B, C, W, T]
+                dur_indices_i, dur_logits = self.duration_decoder.forward_parallel(
+                    inputs=inputs, text_mask=text_mask, temperature=temperature, topk=topk
+                )
+            else:
+                dur_indices_i, dur_logits = self.duration_decoder(
+                    inputs=inputs,
+                    dur_indices=dur_indices,
+                    text_mask=text_mask,
+                    duration_maskin=duration_maskin,
+                    temperature=temperature,
+                    topk=topk,
+                )
+
+            maskin_i = torch.where(text_mask, maskin, False)
+            maskin_i = torch.where(duration_maskin, False, maskin_i)
+
+            dur_indices = torch.where(maskin_i, dur_indices_i, dur_indices)
+            duration_maskin = torch.logical_or(duration_maskin, maskin_i)
+            maskin = torch.logical_or(maskin, torch.nn.functional.pad(maskin[:, :-1], pad=(1, 0), value=True))
+
+        dur_indices = torch.where(duration_maskin, dur_indices, dur_indices_i)
+        # [B, T]
+        durs = self.index_to_duration(dur_indices=dur_indices, mask=text_mask)
+
+        return durs, dur_indices
+
+    def _duration_infer_iters(
         self,
         inputs,
         text_lens,
@@ -1556,10 +1646,10 @@ class DiscreteSpeechModel(ModelPT):
         context_emb,
         context,
         context_lens,
-        word_stride=3,
+        word_stride=2,
         audio_topk=None,
         audio_temperature=None,
-        num_duration_iters=1,
+        num_duration_iters=None,
         duration_topk=None,
         duration_temperature=None,
         speaking_rate=None,
@@ -1589,17 +1679,32 @@ class DiscreteSpeechModel(ModelPT):
             context=context,
             context_mask=context_mask,
         )
-        durs, _ = self._duration_infer(
-            inputs=dur_enc,
-            text_lens=dur_lens,
-            context=context,
-            context_mask=context_mask,
-            num_iters=num_duration_iters,
-            temperature=duration_temperature,
-            topk=duration_topk,
-            silence_pad_start=silence_pad_start,
-            silence_pad_end=silence_pad_end,
-        )
+
+        if num_duration_iters:
+            durs, _ = self._duration_infer_iters(
+                inputs=dur_enc,
+                text_lens=dur_lens,
+                context=context,
+                context_mask=context_mask,
+                num_iters=num_duration_iters,
+                temperature=duration_temperature,
+                topk=duration_topk,
+                silence_pad_start=silence_pad_start,
+                silence_pad_end=silence_pad_end,
+            )
+        else:
+            durs, _ = self._duration_infer(
+                inputs=dur_enc,
+                text=text,
+                text_lens=dur_lens,
+                context=context,
+                context_mask=context_mask,
+                word_stride=word_stride,
+                temperature=duration_temperature,
+                topk=duration_topk,
+                silence_pad_start=silence_pad_start,
+                silence_pad_end=silence_pad_end,
+            )
 
         text_enc_repeated, semantic_lens = regulate_len(durs, text_enc, pace=1.0)
         semantic_mask = get_mask_from_lengths(semantic_lens)

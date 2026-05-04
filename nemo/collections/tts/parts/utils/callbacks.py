@@ -1252,7 +1252,7 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
         num_audio_denoise_iters: int = 0,
         audio_topk: int = 1,
         audio_temperature: float = 1.0,
-        num_duration_iters: int = 1,
+        num_duration_iters: Optional[int] = None,
         duration_topk: int = 1,
         duration_temperature: float = 1.0,
         silence_pad_start: int = None,
