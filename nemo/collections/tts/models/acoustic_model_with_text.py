@@ -229,8 +229,6 @@ class AcousticModelWithText(ModelPT):
         audio_tokens_pred_post, audio_logits_post = self.decoder(
             inputs=encoded,
             audio_mask=audio_mask,
-            text_enc=text_enc,
-            text_mask=text_mask,
             audio_codes=audio_codes,
             audio_maskin=audio_maskin,
         )
@@ -389,8 +387,6 @@ class AcousticModelWithText(ModelPT):
         semantic_tokens,
         inputs,
         audio_lens,
-        text_enc,
-        text_mask,
         num_iters,
         num_denoise_iters,
         temperature=None,
@@ -427,8 +423,6 @@ class AcousticModelWithText(ModelPT):
                 audio_tokens_i, audio_logits = self.decoder(
                     inputs=inputs,
                     audio_mask=audio_mask,
-                    text_enc=text_enc,
-                    text_mask=text_mask,
                     audio_codes=audio_codes,
                     audio_maskin=audio_maskin,
                     temperature=temperature,
@@ -462,8 +456,6 @@ class AcousticModelWithText(ModelPT):
             audio_tokens, _ = self.decoder(
                 inputs=inputs,
                 audio_mask=audio_mask,
-                text_enc=text_enc,
-                text_mask=text_mask,
                 audio_codes=audio_codes,
                 audio_maskin=audio_mask,
             )
@@ -537,8 +529,6 @@ class AcousticModelWithText(ModelPT):
             semantic_tokens=semantic_tokens,
             inputs=encoded,
             audio_lens=semantic_lens,
-            text_enc=text_enc,
-            text_mask=text_mask,
             num_iters=num_audio_iters,
             num_denoise_iters=num_audio_denoise_iters,
             temperature=audio_temperature,
