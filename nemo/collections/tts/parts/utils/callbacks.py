@@ -1247,7 +1247,7 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
         log_audio: bool = False,
         log_audio_gta: bool = False,
         log_alignment: bool = False,
-        word_stride: int = 3,
+        word_stride: int = 2,
         num_audio_iters: int = 1,
         num_audio_denoise_iters: int = 0,
         audio_topk: int = 1,

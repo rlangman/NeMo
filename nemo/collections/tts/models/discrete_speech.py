@@ -158,7 +158,7 @@ class DiscreteSpeechModel(ModelPT):
         )
 
         self.encoder_mask_min = cfg.get("encoder_mask_min", 0.0)
-        self.encoder_mask_max = cfg.get("encoder_mask_max", 0.3)
+        self.encoder_mask_max = cfg.get("encoder_mask_max", 0.5)
         encoder_mask_beta = cfg.get("encoder_mask_beta", 2.0)
         self.encoder_mask_dist = torch.distributions.beta.Beta(concentration1=1.0, concentration0=encoder_mask_beta)
 
@@ -797,7 +797,7 @@ class DiscreteSpeechModel(ModelPT):
 
             dur_noise = dur_sample
 
-            encoder_mask = torch.zeros_like(audio_mask)
+            encoder_mask = None
 
         semantic_token_sample = audio_token_sample[:, : self.semantic_codebook_num, :]
         semantic_codes = audio_codes_sample[:, : self.semantic_codebook_dim, :]
@@ -943,8 +943,6 @@ class DiscreteSpeechModel(ModelPT):
         semantic_tokens = self._semantic_token_infer(
             inputs=semantic_enc,
             audio_lens=semantic_lens,
-            context=context,
-            context_mask=context_mask,
             text=text,
             text_durs=text_durs,
             durs=durs,
@@ -1312,8 +1310,6 @@ class DiscreteSpeechModel(ModelPT):
         self,
         inputs,
         audio_lens,
-        context,
-        context_mask,
         text,
         text_durs,
         durs,
@@ -1386,8 +1382,6 @@ class DiscreteSpeechModel(ModelPT):
         inputs,
         text,
         text_lens,
-        context,
-        context_mask,
         word_stride,
         temperature=None,
         topk=None,
@@ -1447,8 +1441,6 @@ class DiscreteSpeechModel(ModelPT):
         self,
         inputs,
         text_lens,
-        context,
-        context_mask,
         num_iters,
         temperature=None,
         topk=None,
@@ -1703,8 +1695,6 @@ class DiscreteSpeechModel(ModelPT):
             durs, _ = self._duration_infer_iters(
                 inputs=dur_enc,
                 text_lens=dur_lens,
-                context=context,
-                context_mask=context_mask,
                 num_iters=num_duration_iters,
                 temperature=duration_temperature,
                 topk=duration_topk,
@@ -1716,8 +1706,6 @@ class DiscreteSpeechModel(ModelPT):
                 inputs=dur_enc,
                 text=text,
                 text_lens=dur_lens,
-                context=context,
-                context_mask=context_mask,
                 word_stride=word_stride,
                 temperature=duration_temperature,
                 topk=duration_topk,
@@ -1735,8 +1723,6 @@ class DiscreteSpeechModel(ModelPT):
         semantic_tokens = self._semantic_token_infer(
             inputs=semantic_enc,
             audio_lens=semantic_lens,
-            context=context,
-            context_mask=context_mask,
             text=text,
             text_durs=text_durs,
             durs=durs,

@@ -96,6 +96,12 @@ class AcousticModelWithText(ModelPT):
         audio_noise_beta = cfg.get("audio_noise_beta", 2.0)
         self.audio_noise_dist = torch.distributions.beta.Beta(concentration1=1.0, concentration0=audio_noise_beta)
 
+        # Semantic masking hyperparemters
+        self.semantic_mask_min = cfg.get("semantic_mask_min", 0.0)
+        self.semantic_mask_max = cfg.get("semantic_mask_max", 0.5)
+        semantic_mask_beta = cfg.get("semantic_mask_beta", 2.0)
+        self.semantic_mask_dist = torch.distributions.beta.Beta(concentration1=1.0, concentration0=semantic_mask_beta)
+
         # Reconstruction losses
         self.audio_token_loss_scale = cfg.get("audio_token_loss_scale", 1.0)
         self.audio_token_loss_fn = AudioTokenLoss(num_codebooks=self.acoustic_codebook_num)
@@ -202,6 +208,13 @@ class AcousticModelWithText(ModelPT):
             )
             audio_mask = get_mask_from_lengths(audio_token_lens)
             audio_codes_noise = self._add_audio_noise(audio_codes=audio_codes, mask=audio_mask).detach()
+
+            semantic_mask, _ = self.create_infill_mask(
+                input_lens=audio_token_lens,
+                dist=self.semantic_mask_dist,
+                infill_min=self.semantic_mask_min,
+                infill_max=self.semantic_mask_max,
+            )
         else:
             audio_mask = get_mask_from_lengths(audio_token_lens)
             audio_maskin = torch.zeros(
@@ -212,11 +225,15 @@ class AcousticModelWithText(ModelPT):
             audio_maskin = audio_maskin * audio_mask
             audio_codes_noise = audio_codes
 
+            semantic_mask = None
+
         semantic_codes = audio_codes[:, : self.semantic_codebook_dim, :]
         audio_codes = audio_codes_noise[:, self.semantic_codebook_dim :, :]
 
         semantic_codes = rearrange(semantic_codes, 'B C T -> B T C')
-        encoder_input = self.semantic_layer(semantic_codes=semantic_codes, audio_mask=audio_mask)
+        encoder_input = self.semantic_layer(
+            semantic_codes=semantic_codes, audio_mask=audio_mask, semantic_mask=semantic_mask
+        )
         encoded = self.encoder(
             inputs=encoder_input,
             audio_mask=audio_mask,

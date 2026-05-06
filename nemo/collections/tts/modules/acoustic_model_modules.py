@@ -100,12 +100,14 @@ class SemanticInputLayer(NeuralModule):
         super(SemanticInputLayer, self).__init__()
         self.hidden_layer = torch.nn.Linear(input_dim, output_dim)
         self.output_layer = torch.nn.Linear(output_dim, output_dim)
+        self.mask_emb = torch.nn.Parameter(torch.zeros([1, 1, output_dim]))
 
     @property
     def input_types(self):
         return {
             "semantic_codes": NeuralType(('B', 'T', 'C'), EncodedRepresentation()),
             "audio_mask": NeuralType(('B', 'T'), MaskType()),
+            "semantic_mask": NeuralType(('B', 'T_audio'), MaskType(), optional=True),
         }
 
     @property
@@ -115,9 +117,14 @@ class SemanticInputLayer(NeuralModule):
         }
 
     @typecheck()
-    def forward(self, semantic_codes, audio_mask):
+    def forward(self, semantic_codes, audio_mask, semantic_mask=None):
         out = self.hidden_layer(semantic_codes)
         out = self.output_layer(out)
+
+        if semantic_mask is not None:
+            semantic_mask_3d = rearrange(semantic_mask, 'B T -> B T 1')
+            out = torch.where(semantic_mask_3d, self.mask_emb, out)
+
         out = out * rearrange(audio_mask, 'B T -> B T 1')
         return out
 
