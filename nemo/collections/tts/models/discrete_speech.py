@@ -158,7 +158,7 @@ class DiscreteSpeechModel(ModelPT):
         )
 
         self.encoder_mask_min = cfg.get("encoder_mask_min", 0.0)
-        self.encoder_mask_max = cfg.get("encoder_mask_max", 0.3)
+        self.encoder_mask_max = cfg.get("encoder_mask_max", 0.5)
         encoder_mask_beta = cfg.get("encoder_mask_beta", 2.0)
         self.encoder_mask_dist = torch.distributions.beta.Beta(concentration1=1.0, concentration0=encoder_mask_beta)
 
@@ -797,7 +797,7 @@ class DiscreteSpeechModel(ModelPT):
 
             dur_noise = dur_sample
 
-            encoder_mask = torch.zeros_like(audio_mask)
+            encoder_mask = None
 
         semantic_token_sample = audio_token_sample[:, : self.semantic_codebook_num, :]
         semantic_codes = audio_codes_sample[:, : self.semantic_codebook_dim, :]

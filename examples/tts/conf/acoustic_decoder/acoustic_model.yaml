@@ -1,6 +1,6 @@
-name: AcousticModel
+name: AcousticDecoder
 
-batch_size: 1500
+batch_size: 1200
 
 max_epochs: ???
 feature_name: ???
@@ -17,19 +17,15 @@ heteronyms_path: ???
 
 log_dir: ???
 
-codebook_num: 5
-codebook_levels: [4, 4, 4, 4, 4, 4, 4, 4]
-codebook_dim: 40
+codebook_num: 4
+codebook_levels: [4, 4, 4, 4, 4, 4]
+codebook_size: 4096
 
 semantic_codebook_num: 1
-semantic_codebook_num_total: 10
-semantic_codebook_levels: [4, 4, 4, 4]
-semantic_codebook_dim: 4
+semantic_codebook_dim: 6
 
-acoustic_codebook_num: 6
-acoustic_codebook_levels: [4, 4, 4, 4, 4, 4]
-acoustic_codebook_dim: 36
-codebook_size: 4096
+acoustic_codebook_num: 3
+acoustic_codebook_dim: 18
 
 feature_readers:
   audio_codec:
@@ -49,18 +45,8 @@ model:
 
   vector_quantizer:
     _target_: nemo.collections.tts.modules.audio_codec_modules.GroupFiniteScalarQuantizer
-    num_groups: ${semantic_codebook_num_total}
-    num_levels_per_group: ${semantic_codebook_levels}
-
-  vector_quantizer_codec:
-    _target_: nemo.collections.tts.modules.audio_codec_modules.GroupFiniteScalarQuantizer
     num_groups: ${codebook_num}
     num_levels_per_group: ${codebook_levels}
-
-  vector_quantizer_acoustic:
-    _target_: nemo.collections.tts.modules.audio_codec_modules.GroupFiniteScalarQuantizer
-    num_groups: ${acoustic_codebook_num}
-    num_levels_per_group: ${acoustic_codebook_levels}
 
   train_ds:
     dataset:
@@ -92,7 +78,7 @@ model:
 
   log_config:
     log_dir: ${log_dir}
-    log_epochs: [1, 5]
+    log_epochs: [1, 5, 15]
     epoch_frequency: 10
     log_tensorboard: false
     log_wandb: false
@@ -149,7 +135,7 @@ model:
 
   optim:
     name: adamw
-    lr: 1e-2
+    lr: 2e-2
     betas: [0.9, 0.999]
     weight_decay: 1e-6
 
