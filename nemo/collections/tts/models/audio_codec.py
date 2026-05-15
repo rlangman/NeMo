@@ -181,8 +181,11 @@ class AudioCodecModel(ModelPT):
             semantic_codec.eval()
             semantic_codec.freeze()
             self.register_nemo_submodule(name="semantic_codec", config_field="semantic_codec", model=semantic_codec)
+
+            self.codebook_dropout_rate = cfg.get("codebook_dropout_rate", 0.0)
         else:
             self.semantic_codec = None
+            self.codebook_dropout_rate = 0.0
 
         # Mel loss setup
         loss_resolutions = cfg.loss_resolutions
@@ -574,6 +577,26 @@ class AudioCodecModel(ModelPT):
         audio, audio_len = self.pad_audio(audio=audio, audio_len=audio_len, samples_per_frame=self.samples_per_frame)
         return audio, audio_len
 
+    def _codebook_dropout(self, encoded):
+        batch_size = encoded.shape[0]
+        embed_dim = encoded.shape[1]
+        num_frames = encoded.shape[2]
+        # [B]
+        apply_dropout = torch.rand(size=[batch_size], device=encoded.device) < self.codebook_dropout_rate
+        num_codebooks = torch.randint(low=1, high=self.num_codebooks + 1, size=[batch_size], device=encoded.device)
+        num_unmask = self.vector_quantizer.codebook_dim_per_group * num_codebooks
+        num_unmask = torch.where(apply_dropout, num_unmask, embed_dim)
+        # [B, D, T]
+        embed_indices = (
+            torch.arange(start=0, end=embed_dim, device=encoded.device)
+            .unsqueeze(0)
+            .unsqueeze(2)
+            .repeat(batch_size, 1, num_frames)
+        )
+        codebook_mask = embed_indices < num_unmask.unsqueeze(1).unsqueeze(2)
+        out = encoded * codebook_mask
+        return out
+
     def _process_batch(self, batch):
         # [B, T_audio]
         audio = batch.get("audio")
@@ -601,6 +624,9 @@ class AudioCodecModel(ModelPT):
             encoded = encoded.to(encoded.dtype)  # make sure encoded is converted to the right dtype
         else:
             commit_loss = 0.0
+
+        if self.training and self.codebook_dropout_rate:
+            encoded = self._codebook_dropout(encoded)
 
         # [B, T]
         audio_gen, _ = self.audio_decoder(inputs=encoded, input_len=encoded_len)
