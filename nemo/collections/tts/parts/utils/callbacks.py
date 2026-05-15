@@ -917,14 +917,12 @@ class AcousticModelWithTextArtifactGenerator(ArtifactGenerator):
         log_audio: bool = False,
         log_semantic: bool = False,
         num_audio_iters: int = 1,
-        num_audio_denoise_iters: int = 0,
         audio_topk: int = 1,
         audio_temperature: float = 1.0,
     ) -> None:
         self.log_audio = log_audio
         self.log_semantic = log_semantic
         self.num_audio_iters = num_audio_iters
-        self.num_audio_denoise_iters = num_audio_denoise_iters
         self.audio_topk = audio_topk
         self.audio_temperature = audio_temperature
         self.audio_codec = _load_vocoder(
@@ -1000,7 +998,6 @@ class AcousticModelWithTextArtifactGenerator(ArtifactGenerator):
                 text=text,
                 text_lens=text_lens,
                 num_audio_iters=self.num_audio_iters,
-                num_audio_denoise_iters=self.num_audio_denoise_iters,
                 audio_topk=self.audio_topk,
                 audio_temperature=self.audio_temperature,
             )
@@ -1075,7 +1072,6 @@ class AcousticModelWithContextArtifactGenerator(ArtifactGenerator):
         log_audio: bool = False,
         log_semantic: bool = False,
         num_audio_iters: int = 1,
-        num_audio_denoise_iters: int = 0,
         audio_topk: int = 1,
         audio_temperature: float = 1.0,
         max_context_len: int = 50,
@@ -1083,7 +1079,6 @@ class AcousticModelWithContextArtifactGenerator(ArtifactGenerator):
         self.log_audio = log_audio
         self.log_semantic = log_semantic
         self.num_audio_iters = num_audio_iters
-        self.num_audio_denoise_iters = num_audio_denoise_iters
         self.audio_topk = audio_topk
         self.audio_temperature = audio_temperature
         self.max_context_len = max_context_len
@@ -1167,7 +1162,6 @@ class AcousticModelWithContextArtifactGenerator(ArtifactGenerator):
                 text=text,
                 text_lens=text_lens,
                 num_audio_iters=self.num_audio_iters,
-                num_audio_denoise_iters=self.num_audio_denoise_iters,
                 audio_topk=self.audio_topk,
                 audio_temperature=self.audio_temperature,
             )
@@ -1249,7 +1243,6 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
         log_alignment: bool = False,
         word_stride: int = 2,
         num_audio_iters: int = 1,
-        num_audio_denoise_iters: int = 0,
         audio_topk: int = 1,
         audio_temperature: float = 1.0,
         num_duration_iters: Optional[int] = None,
@@ -1264,7 +1257,6 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
         self.log_alignment = log_alignment
         self.word_stride = word_stride
         self.num_audio_iters = num_audio_iters
-        self.num_audio_denoise_iters = num_audio_denoise_iters
         self.audio_topk = audio_topk
         self.audio_temperature = audio_temperature
         self.num_duration_iters = num_duration_iters
@@ -1365,7 +1357,6 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
                     semantic_tokens=semantic_tokens_pred,
                     semantic_lens=audio_token_lens,
                     num_audio_iters=self.num_audio_iters,
-                    num_audio_denoise_iters=self.num_audio_denoise_iters,
                     audio_topk=self.audio_topk,
                     audio_temperature=self.audio_temperature,
                 )
@@ -1389,7 +1380,6 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
                         text=tokens,
                         text_lens=token_lens,
                         num_audio_iters=self.num_audio_iters,
-                        num_audio_denoise_iters=self.num_audio_denoise_iters,
                         audio_topk=self.audio_topk,
                         audio_temperature=self.audio_temperature,
                     )
@@ -1405,7 +1395,6 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
                         text=tokens,
                         text_lens=token_lens,
                         num_audio_iters=self.num_audio_iters,
-                        num_audio_denoise_iters=self.num_audio_denoise_iters,
                         audio_topk=self.audio_topk,
                         audio_temperature=self.audio_temperature,
                     )
@@ -1478,7 +1467,6 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
                 text=tokens,
                 text_lens=token_lens,
                 num_audio_iters=self.num_audio_iters,
-                num_audio_denoise_iters=self.num_audio_denoise_iters,
                 audio_topk=self.audio_topk,
                 audio_temperature=self.audio_temperature,
             )

@@ -29,7 +29,7 @@ from nemo.collections.tts.parts.utils.callbacks import LoggingCallback
 from nemo.collections.tts.parts.utils.helpers import get_mask_from_lengths
 from nemo.core import ModelPT
 from nemo.core.classes.common import PretrainedModelInfo, typecheck
-from nemo.core.neural_types.elements import FloatType, IntType, LengthsType, LogitsType, TokenIndex
+from nemo.core.neural_types.elements import FloatType, IntType, LengthsType, LogitsType, MaskType, TokenIndex
 from nemo.core.neural_types.neural_type import NeuralType
 from nemo.utils import model_utils
 from nemo.utils.decorators import experimental
@@ -141,30 +141,6 @@ class AcousticModelWithText(ModelPT):
 
         return infill_mask, infill_loss_mask
 
-    def _add_audio_noise(self, audio_codes, mask):
-        batch_size = audio_codes.shape[0]
-        num_frames = audio_codes.shape[2]
-        mask_3d = rearrange(mask, 'B T -> B 1 T')
-        # [B, 1, 1]
-        batch_noise_percent = self.audio_noise_dist.sample(sample_shape=torch.Size([batch_size, 1, 1])).to(
-            audio_codes.device
-        )
-        batch_noise_percent = (
-            self.audio_noise_percent_min
-            + (self.audio_noise_percent_max - self.audio_noise_percent_min) * batch_noise_percent
-        )
-        # [B, 1, T]
-        time_noise_percent = torch.rand(size=torch.Size([batch_size, 1, num_frames]), device=audio_codes.device)
-        noise_percent = batch_noise_percent * time_noise_percent
-        add_noise = torch.rand(size=audio_codes.shape, device=audio_codes.device) < noise_percent
-        noise_mask = mask_3d * add_noise
-
-        noise = torch.randint(low=0, high=4, size=audio_codes.shape, device=audio_codes.device)
-        noise = noise / 2.0 - 1.0
-
-        audio_codes_noise = torch.where(noise_mask, noise, audio_codes)
-        return audio_codes_noise
-
     @typecheck(
         input_types={
             "audio_tokens": NeuralType(('B', 'C', 'T_audio'), TokenIndex()),
@@ -178,6 +154,7 @@ class AcousticModelWithText(ModelPT):
             "audio_logits": NeuralType(('B', 'C', 'W', 'T_audio'), LogitsType()),
             "audio_tokens_pred_post": NeuralType(('B', 'C', 'T_audio'), TokenIndex()),
             "audio_logits_post": NeuralType(('B', 'C', 'W', 'T_audio'), LogitsType()),
+            "loss_mask": NeuralType(('B', 'T_audio'), MaskType()),
         },
     )
     def forward(self, audio_tokens, audio_token_lens, text, text_lens):
@@ -200,14 +177,13 @@ class AcousticModelWithText(ModelPT):
         text_enc = self.text_encoder(text=text, text_mask=text_mask)
 
         if self.training:
-            audio_maskin, _ = self.create_infill_mask(
+            audio_maskin, loss_mask = self.create_infill_mask(
                 input_lens=audio_token_lens,
                 dist=self.audio_infill_dist,
                 infill_min=self.audio_infill_min,
                 infill_max=self.audio_infill_max,
             )
             audio_mask = get_mask_from_lengths(audio_token_lens)
-            audio_codes_noise = self._add_audio_noise(audio_codes=audio_codes, mask=audio_mask).detach()
 
             semantic_mask, _ = self.create_infill_mask(
                 input_lens=audio_token_lens,
@@ -224,11 +200,12 @@ class AcousticModelWithText(ModelPT):
             audio_maskin[:, ::10] = True
             audio_maskin = audio_maskin * audio_mask
             audio_codes_noise = audio_codes
+            loss_mask = ~audio_maskin * audio_mask
 
             semantic_mask = None
 
         semantic_codes = audio_codes[:, : self.semantic_codebook_dim, :]
-        audio_codes = audio_codes_noise[:, self.semantic_codebook_dim :, :]
+        audio_codes = audio_codes[:, self.semantic_codebook_dim :, :]
 
         semantic_codes = rearrange(semantic_codes, 'B C T -> B T C')
         encoder_input = self.semantic_layer(
@@ -256,6 +233,7 @@ class AcousticModelWithText(ModelPT):
             audio_logits,
             audio_tokens_pred_post,
             audio_logits_post,
+            loss_mask,
         )
 
     def training_step(self, batch_dict, batch_idx):
@@ -270,6 +248,7 @@ class AcousticModelWithText(ModelPT):
             audio_token_logits,
             _,
             audio_token_logits_post,
+            loss_mask,
         ) = self(audio_tokens=audio_tokens, audio_token_lens=audio_token_lens, text=text, text_lens=text_lens)
 
         audio_mask = get_mask_from_lengths(audio_token_lens)
@@ -279,7 +258,7 @@ class AcousticModelWithText(ModelPT):
         train_audio_token_loss = self.audio_token_loss_scale * audio_token_loss
 
         audio_token_post_loss = self.audio_token_loss_fn(
-            logits=audio_token_logits_post, target_tokens=acoustic_tokens, mask=audio_mask
+            logits=audio_token_logits_post, target_tokens=acoustic_tokens, mask=loss_mask
         )
         train_audio_token_post_loss = self.audio_token_loss_scale * audio_token_post_loss
 
@@ -305,6 +284,7 @@ class AcousticModelWithText(ModelPT):
             audio_token_logits,
             audio_tokens_pred_post,
             audio_token_logits_post,
+            loss_mask,
         ) = self(audio_tokens=audio_tokens, audio_token_lens=audio_token_lens, text=text, text_lens=text_lens)
 
         audio_mask = get_mask_from_lengths(audio_token_lens)
@@ -317,10 +297,11 @@ class AcousticModelWithText(ModelPT):
         audio_token_accuracy = audio_token_correct.sum() / num_audio_tokens
 
         audio_token_post_loss = self.audio_token_loss_fn(
-            logits=audio_token_logits_post, target_tokens=acoustic_tokens, mask=audio_mask
+            logits=audio_token_logits_post, target_tokens=acoustic_tokens, mask=loss_mask
         )
-        audio_token_correct_post = (acoustic_tokens == audio_tokens_pred_post) * rearrange(audio_mask, 'B T -> B 1 T')
-        audio_token_post_accuracy = audio_token_correct_post.sum() / num_audio_tokens
+        audio_token_correct_post = (acoustic_tokens == audio_tokens_pred_post) * rearrange(loss_mask, 'B T -> B 1 T')
+        num_masked_tokens = max(1, loss_mask.sum() * self.acoustic_codebook_num)
+        audio_token_post_accuracy = audio_token_correct_post.sum() / num_masked_tokens
 
         metrics = {
             "val_loss": audio_token_loss,
@@ -405,7 +386,6 @@ class AcousticModelWithText(ModelPT):
         inputs,
         audio_lens,
         num_iters,
-        num_denoise_iters,
         temperature=None,
         topk=None,
     ):
@@ -456,32 +436,20 @@ class AcousticModelWithText(ModelPT):
             top_i = torch.clamp_max(index_shift + i, max=num_tokens - 1)
             # [B, T // num_iters, T]
             one_hot = torch.nn.functional.one_hot(top_i, num_classes=num_tokens)
+
             # [B, T]
             maskin_i = one_hot.sum(dim=1).bool()
             maskin_i = torch.where(audio_mask, maskin_i, False)
-            audio_maskin = torch.logical_or(audio_maskin, maskin_i)
-            maskin_3d_i = rearrange(audio_maskin, 'B T -> B T 1')
+            maskin_i = torch.where(audio_maskin, False, maskin_i)
+            maskin_3d_i = rearrange(maskin_i, 'B T -> B T 1')
 
             audio_tokens = torch.where(maskin_3d_i, audio_tokens_i, audio_tokens)
             audio_codes = torch.where(maskin_3d_i, audio_codes_i, audio_codes)
 
+            audio_maskin = torch.logical_or(audio_maskin, maskin_i)
+
         audio_maskin_3d = rearrange(audio_maskin, 'B T -> B T 1')
         audio_tokens = torch.where(audio_maskin_3d, audio_tokens, audio_tokens_i)
-        audio_codes = torch.where(audio_maskin_3d, audio_codes, audio_codes_i)
-
-        for _ in range(num_denoise_iters):
-            audio_tokens, _ = self.decoder(
-                inputs=inputs,
-                audio_mask=audio_mask,
-                audio_codes=audio_codes,
-                audio_maskin=audio_mask,
-            )
-            audio_tokens = rearrange(audio_tokens, 'B C T -> B T C')
-            audio_tokens_rearrange = rearrange(audio_tokens, 'B T C -> C B T')
-            # [B, D, T]
-            audio_codes = self.vector_quantizer_acoustic.decode(indices=audio_tokens_rearrange, input_len=audio_lens)
-            audio_codes = rearrange(audio_codes, 'B D T -> B T D')
-
         audio_tokens = rearrange(audio_tokens, 'B T C -> B C T')
 
         if self.vector_quantizer_converter_acoustic is not None:
@@ -505,7 +473,6 @@ class AcousticModelWithText(ModelPT):
             "text": NeuralType(('B', 'T_text'), TokenIndex()),
             "text_lens": NeuralType(tuple('B'), LengthsType()),
             "num_audio_iters": NeuralType((), IntType(), optional=True),
-            "num_audio_denoise_iters": NeuralType((), IntType(), optional=True),
             "audio_topk": NeuralType((), IntType(), optional=True),
             "audio_temperature": NeuralType((), FloatType(), optional=True),
         },
@@ -520,7 +487,6 @@ class AcousticModelWithText(ModelPT):
         text,
         text_lens,
         num_audio_iters=1,
-        num_audio_denoise_iters=0,
         audio_topk=None,
         audio_temperature=None,
     ):
@@ -547,7 +513,6 @@ class AcousticModelWithText(ModelPT):
             inputs=encoded,
             audio_lens=semantic_lens,
             num_iters=num_audio_iters,
-            num_denoise_iters=num_audio_denoise_iters,
             temperature=audio_temperature,
             topk=audio_topk,
         )
