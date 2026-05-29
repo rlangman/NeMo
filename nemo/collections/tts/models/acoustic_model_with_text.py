@@ -90,12 +90,6 @@ class AcousticModelWithText(ModelPT):
         audio_infill_beta = cfg.get("audio_infill_beta", 2.0)
         self.audio_infill_dist = torch.distributions.beta.Beta(concentration1=1.0, concentration0=audio_infill_beta)
 
-        # Audio denoising hyperparemters
-        self.audio_noise_percent_min = cfg.get("audio_noise_percent_min", 0.0)
-        self.audio_noise_percent_max = cfg.get("audio_noise_percent_max", 0.3)
-        audio_noise_beta = cfg.get("audio_noise_beta", 2.0)
-        self.audio_noise_dist = torch.distributions.beta.Beta(concentration1=1.0, concentration0=audio_noise_beta)
-
         # Semantic masking hyperparemters
         self.semantic_mask_min = cfg.get("semantic_mask_min", 0.0)
         self.semantic_mask_max = cfg.get("semantic_mask_max", 0.5)
@@ -173,6 +167,7 @@ class AcousticModelWithText(ModelPT):
         # [batch_size, code_dim, audio_token_len]
         audio_codes = self.vector_quantizer.decode(indices=audio_tokens_rearrange, input_len=audio_token_lens).detach()
 
+        audio_mask = get_mask_from_lengths(audio_token_lens)
         text_mask = get_mask_from_lengths(text_lens)
         text_enc = self.text_encoder(text=text, text_mask=text_mask)
 
@@ -183,8 +178,6 @@ class AcousticModelWithText(ModelPT):
                 infill_min=self.audio_infill_min,
                 infill_max=self.audio_infill_max,
             )
-            audio_mask = get_mask_from_lengths(audio_token_lens)
-
             semantic_mask, _ = self.create_infill_mask(
                 input_lens=audio_token_lens,
                 dist=self.semantic_mask_dist,
@@ -192,14 +185,12 @@ class AcousticModelWithText(ModelPT):
                 infill_max=self.semantic_mask_max,
             )
         else:
-            audio_mask = get_mask_from_lengths(audio_token_lens)
             audio_maskin = torch.zeros(
                 [audio_codes.shape[0], audio_codes.shape[2]], dtype=torch.bool, device=audio_tokens.device
             )
             # Unmask every 10th element
             audio_maskin[:, ::10] = True
             audio_maskin = audio_maskin * audio_mask
-            audio_codes_noise = audio_codes
             loss_mask = ~audio_maskin * audio_mask
 
             semantic_mask = None

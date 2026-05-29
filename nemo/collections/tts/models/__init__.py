@@ -13,6 +13,8 @@
 # limitations under the License.
 
 from nemo.collections.tts.models.acoustic_model import AcousticModel
+from nemo.collections.tts.models.acoustic_model_ar_with_context import AcousticModelAutoregressiveWithContext
+from nemo.collections.tts.models.acoustic_model_ar_with_text import AcousticModelAutoregressiveWithText
 from nemo.collections.tts.models.acoustic_model_with_context import AcousticModelWithContext
 from nemo.collections.tts.models.acoustic_model_with_text import AcousticModelWithText
 from nemo.collections.tts.models.aligner import AlignerModel

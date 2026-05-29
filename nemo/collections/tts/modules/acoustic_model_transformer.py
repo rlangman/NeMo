@@ -479,6 +479,7 @@ class AudioTransformer(NeuralModule):
             "out": NeuralType(('B', 'T', 'D'), EncodedRepresentation()),
         }
 
+    @typecheck()
     def forward(self, inputs, audio_mask):
         audio_mask_3d = rearrange(audio_mask, 'B T_audio -> B T_audio 1')
 
@@ -513,6 +514,7 @@ class AudioEncoder(NeuralModule):
             "audio_enc": NeuralType(('B', 'T', 'D'), EncodedRepresentation()),
         }
 
+    @typecheck()
     def forward(self, inputs, audio_mask):
         audio_enc = self.input_layer(inputs)
 
@@ -576,6 +578,7 @@ class AudioTransformerWithText(NeuralModule):
             "out": NeuralType(('B', 'T', 'D'), EncodedRepresentation()),
         }
 
+    @typecheck()
     def forward(self, inputs, audio_mask, text_enc, text_mask):
         audio_mask_3d = rearrange(audio_mask, 'B T_audio -> B T_audio 1')
         text_mask_3d = rearrange(text_mask, 'B T_text -> B 1 T_text')
@@ -623,6 +626,7 @@ class AudioEncoderWithText(NeuralModule):
             "audio_enc": NeuralType(('B', 'T', 'D'), EncodedRepresentation()),
         }
 
+    @typecheck()
     def forward(self, inputs, audio_mask, text_enc, text_mask):
         audio_enc = self.input_layer(inputs)
 
@@ -689,6 +693,7 @@ class AudioTransformerWithContext(NeuralModule):
             "out": NeuralType(('B', 'T', 'D'), EncodedRepresentation()),
         }
 
+    @typecheck()
     def forward(self, inputs, audio_mask, context, context_mask, text_enc, text_mask):
         audio_mask_3d = rearrange(audio_mask, 'B T_audio -> B T_audio 1')
         text_mask_3d = rearrange(text_mask, 'B T_text -> B 1 T_text')
@@ -746,6 +751,7 @@ class AudioEncoderWithContext(NeuralModule):
             "audio_enc": NeuralType(('B', 'T', 'D'), EncodedRepresentation()),
         }
 
+    @typecheck()
     def forward(self, inputs, audio_mask, context, context_mask, text_enc, text_mask):
         audio_enc = self.input_layer(inputs)
 
