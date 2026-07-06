@@ -20,6 +20,7 @@ import os
 import random
 from dataclasses import dataclass
 from pathlib import Path
+import re
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -297,7 +298,8 @@ class TextToSpeechDataset(Dataset):
             else:
                 text = entry["text"]
 
-            text = dropout_pc(text=text, dropout_rate=self.pc_dropout_rate)
+            text = re.sub(r"\s+", " ", text)
+            text = text.strip()
 
             if self.include_speaker:
                 speaker = entry["speaker"]
@@ -337,7 +339,8 @@ class TextToSpeechDataset(Dataset):
         }
 
         if self.text_tokenizer is not None:
-            tokens = self.text_tokenizer(data.text)
+            text = dropout_pc(text=data.text, dropout_rate=self.pc_dropout_rate)
+            tokens = self.text_tokenizer(text)
             tokens = torch.tensor(tokens, dtype=torch.int32)
             text_len = tokens.shape[0]
             example["tokens"] = tokens

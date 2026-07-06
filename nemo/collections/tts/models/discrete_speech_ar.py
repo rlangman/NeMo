@@ -14,6 +14,7 @@
 
 import math
 from pathlib import Path
+import logging
 from typing import List
 
 import torch
@@ -40,7 +41,6 @@ from nemo.core.neural_types.elements import (
     LengthsType,
     LogitsType,
     LogprobsType,
-    MaskType,
     ProbsType,
     TokenDurationType,
     TokenIndex,
@@ -171,6 +171,8 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
 
         self.forward_sum_loss_fn = ForwardSumLoss()
         self.bin_loss_fn = BinLoss()
+
+        self.skip_nan_gradients = cfg.get("skip_nan_gradients", True)
 
         self.log_config = cfg.get("log_config", None)
 
@@ -624,10 +626,14 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
             "audio_token_sample_lens": NeuralType(tuple('B'), LengthsType()),
             "semantic_tokens_pred": NeuralType(('B', 'C', 'T_audio'), TokenIndex()),
             "semantic_logits": NeuralType(('B', 'C', 'W', 'T_audio'), LogitsType()),
+            "semantic_tokens_pred_pre": NeuralType(('B', 'C', 'T_audio'), TokenIndex()),
+            "semantic_logits_pre": NeuralType(('B', 'C', 'W', 'T_audio'), LogitsType()),
             "dur_indices": NeuralType(('B', 'T_text'), TokenIndex()),
             "dur_lens": NeuralType(tuple('B'), LengthsType()),
             "dur_indices_pred": NeuralType(('B', 'T_text'), TokenIndex()),
             "dur_logits": NeuralType(('B', 'D', 'T_text'), LogitsType()),
+            "dur_indices_pred_pre": NeuralType(('B', 'T_text'), TokenIndex()),
+            "dur_logits_pre": NeuralType(('B', 'D', 'T_text'), LogitsType()),
             "speaking_rate_indices": NeuralType(tuple('B'), TokenIndex()),
             "speaking_rate_indices_pred": NeuralType(tuple('B'), TokenIndex()),
             "speaking_rate_logits": NeuralType(('B', 'C'), LogitsType()),
@@ -759,8 +765,12 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
         (
             semantic_tokens_pred,
             semantic_token_logits,
+            semantic_tokens_pred_pre,
+            semantic_token_logits_pre,
             dur_indices_pred,
             dur_logits,
+            dur_indices_pred_pre,
+            dur_logits_pre,
             speaking_rate_indices_pred,
             speaking_rate_logits,
         ) = self.forward_internal(
@@ -784,10 +794,14 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
             audio_token_sample_lens,
             semantic_tokens_pred,
             semantic_token_logits,
+            semantic_tokens_pred_pre,
+            semantic_token_logits_pre,
             dur_indices,
             dur_lens,
             dur_indices_pred,
             dur_logits,
+            dur_indices_pred_pre,
+            dur_logits_pre,
             speaking_rate_indices,
             speaking_rate_indices_pred,
             speaking_rate_logits,
@@ -907,10 +921,14 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
             audio_token_sample_lens,
             _,
             semantic_token_logits,
+            _,
+            semantic_token_logits_pre,
             dur_indices,
             dur_lens,
             _,
             dur_logits,
+            _,
+            dur_logits_pre,
             speaking_rate_indices,
             _,
             speaking_rate_logits,
@@ -935,10 +953,18 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
         )
         train_semantic_token_loss = self.audio_token_loss_scale * semantic_token_loss
 
+        semantic_token_loss_pre = self.semantic_token_loss_fn(
+            logits=semantic_token_logits_pre, target_tokens=semantic_token_sample, mask=audio_mask
+        )
+        train_semantic_token_loss_pre = self.audio_token_loss_scale * semantic_token_loss_pre
+
         dur_mask = get_mask_from_lengths(dur_lens)
 
         duration_loss = self.duration_loss_fn(logits=dur_logits, target_index=dur_indices.detach(), mask=dur_mask)
         train_dur_loss = self.duration_loss_scale * duration_loss
+
+        duration_loss_pre = self.duration_loss_fn(logits=dur_logits_pre, target_index=dur_indices.detach(), mask=dur_mask)
+        train_dur_loss_pre = self.duration_loss_scale * duration_loss_pre
 
         speaking_rate_loss = self.speaking_rate_loss_fn(
             logits=speaking_rate_logits, target_index=speaking_rate_indices.detach()
@@ -962,7 +988,9 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
 
         loss = (
             train_semantic_token_loss
+            + train_semantic_token_loss_pre
             + train_dur_loss
+            + train_dur_loss_pre
             + train_speaking_rate_loss
             + train_ctc_loss
             + train_bin_loss
@@ -970,7 +998,9 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
 
         metrics = {
             "t_semantic_token_loss": semantic_token_loss,
+            "t_semantic_token_loss_pre": semantic_token_loss_pre,
             "t_duration_loss": duration_loss,
+            "t_duration_loss_pre": duration_loss_pre,
             "t_speaking_rate_loss": speaking_rate_loss,
             "t_ctc_loss": ctc_loss,
             "t_bin_loss": bin_loss,
@@ -1006,10 +1036,14 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
             audio_token_sample_lens,
             semantic_tokens_pred,
             semantic_token_logits,
+            semantic_tokens_pred_pre,
+            semantic_token_logits_pre,
             dur_indices,
             dur_lens,
             dur_indices_pred,
             dur_logits,
+            dur_indices_pred_pre,
+            dur_logits_pre,
             speaking_rate_indices,
             speaking_rate_indices_pred,
             speaking_rate_logits,
@@ -1038,11 +1072,25 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
             semantic_token_correct.sum() / audio_token_sample_lens.sum() / self.semantic_codebook_num
         )
 
+        semantic_token_loss_pre = self.semantic_token_loss_fn(
+            logits=semantic_token_logits_pre, target_tokens=semantic_token_sample, mask=audio_mask
+        )
+        semantic_token_correct_pre = (semantic_token_sample == semantic_tokens_pred_pre) * rearrange(
+            audio_mask, 'B T -> B 1 T'
+        )
+        semantic_token_accuracy_pre = (
+            semantic_token_correct_pre.sum() / audio_token_sample_lens.sum() / self.semantic_codebook_num
+        )
+
         dur_mask = get_mask_from_lengths(dur_lens)
 
         duration_loss = self.duration_loss_fn(logits=dur_logits, target_index=dur_indices, mask=dur_mask)
         dur_token_correct = (dur_indices == dur_indices_pred) * dur_mask
         dur_token_accuracy = dur_token_correct.sum() / dur_lens.sum()
+
+        duration_loss_pre = self.duration_loss_fn(logits=dur_logits_pre, target_index=dur_indices, mask=dur_mask)
+        dur_token_correct_pre = (dur_indices == dur_indices_pred_pre) * dur_mask
+        dur_token_accuracy_pre = dur_token_correct_pre.sum() / dur_lens.sum()
 
         speaking_rate_loss = self.speaking_rate_loss_fn(
             logits=speaking_rate_logits, target_index=speaking_rate_indices
@@ -1054,12 +1102,41 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
             "val_loss": semantic_token_loss,
             "val_semantic_token_loss": semantic_token_loss,
             "val_semantic_token_accuracy": semantic_token_accuracy,
+            "val_semantic_token_loss_pre": semantic_token_loss_pre,
+            "val_semantic_token_accuracy_pre": semantic_token_accuracy_pre,
             "val_duration_loss": duration_loss,
             "val_dur_token_accuracy": dur_token_accuracy,
+            "val_duration_loss_pre": duration_loss_pre,
+            "val_dur_token_accuracy_pre": dur_token_accuracy_pre,
             "val_speaking_rate_loss": speaking_rate_loss,
             "val_speaking_rate_accuracy": speaking_rate_accuracy,
         }
         self.log_dict(metrics, on_epoch=True, sync_dist=True)
+
+    def on_after_backward(self):
+        """
+        zero-out the gradients which any of them is NAN or INF
+        """
+        super().on_after_backward()
+
+        if self.skip_nan_gradients:
+            device = next(self.parameters()).device
+            valid_gradients = torch.tensor([1], device=device, dtype=torch.float32)
+
+            # valid_gradients = True
+            for param_name, param in self.named_parameters():
+                if param.grad is not None:
+                    is_not_nan_or_inf = not (torch.isnan(param.grad).any() or torch.isinf(param.grad).any())
+                    if not is_not_nan_or_inf:
+                        valid_gradients = valid_gradients * 0
+                        break
+
+            if torch.distributed.is_initialized():
+                torch.distributed.all_reduce(valid_gradients, op=torch.distributed.ReduceOp.MIN)
+
+            if valid_gradients < 1:
+                logging.warning('detected inf or nan values in gradients! Setting gradients to zero.')
+                self.zero_grad()
 
     def _setup_train_dataloader(self, dataset_config, dataloader_params):
         dataset = create_text_to_speech_dataset(
@@ -1210,6 +1287,7 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
             context=context,
             context_mask=context_mask,
         )
+        dur_indices_pred_pre, dur_logits_pre = self.duration_decoder.forward_parallel(inputs=dur_enc, text_mask=dur_mask)
 
         dur_indices_pred, dur_logits = self.duration_decoder(
             inputs=dur_enc,
@@ -1227,6 +1305,9 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
             context=context,
             context_mask=context_mask,
         )
+        semantic_tokens_pred_pre, semantic_logits_pre = self.decoder.forward_parallel(
+            inputs=semantic_enc, audio_mask=audio_mask
+        )
 
         semantic_codes = rearrange(semantic_codes, 'B C T -> B T C')
         semantic_tokens_pred, semantic_logits = self.decoder(
@@ -1239,8 +1320,12 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
         return (
             semantic_tokens_pred,
             semantic_logits,
+            semantic_tokens_pred_pre,
+            semantic_logits_pre,
             dur_indices_pred,
             dur_logits,
+            dur_indices_pred_pre,
+            dur_logits_pre,
             speaking_rate_indices_pred,
             speaking_rate_logits,
         )
@@ -1250,15 +1335,16 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
         inputs,
         audio_lens,
         frames_per_iter,
-        num_audio_iters,
+        num_iters,
+        infer_weight,
         temperature=None,
         topk=None,
     ):
-        if num_audio_iters > 0:
+        if num_iters > 0:
             audio_tokens = self.decoder.infer_diffusion(
                 inputs=inputs,
                 audio_lens=audio_lens,
-                num_iters=num_audio_iters,
+                num_iters=num_iters,
                 vector_quantizer=self.vector_quantizer,
                 temperature=temperature,
                 topk=topk,
@@ -1269,6 +1355,7 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
                 audio_lens=audio_lens,
                 frames_per_iter=frames_per_iter,
                 vector_quantizer=self.vector_quantizer,
+                infer_weight=infer_weight,
                 temperature=temperature,
                 topk=topk,
             )
@@ -1280,17 +1367,18 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
         inputs,
         text_lens,
         frames_per_iter,
-        num_duration_iters,
+        num_iters,
+        infer_weight,
         temperature=None,
         topk=None,
         silence_pad_start=None,
         silence_pad_end=None,
     ):
-        if num_duration_iters > 0:
+        if num_iters > 0:
             audio_tokens = self.duration_decoder.infer_diffusion(
                 inputs=inputs,
                 text_lens=text_lens,
-                num_iters=num_duration_iters,
+                num_iters=num_iters,
                 temperature=temperature,
                 topk=topk,
                 silence_pad_start=silence_pad_start,
@@ -1301,6 +1389,7 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
                 inputs=inputs,
                 text_lens=text_lens,
                 frames_per_iter=frames_per_iter,
+                infer_weight=infer_weight,
                 temperature=temperature,
                 topk=topk,
                 silence_pad_start=None,
@@ -1318,8 +1407,10 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
             "context_lens": NeuralType(tuple('B'), LengthsType()),
             "frames_per_iter": NeuralType((), IntType(), optional=True),
             "num_iters": NeuralType((), IntType(), optional=True),
+            "audio_weight": NeuralType((), FloatType(), optional=True),
             "audio_topk": NeuralType((), IntType(), optional=True),
             "audio_temperature": NeuralType((), FloatType(), optional=True),
+            "duration_weight": NeuralType((), FloatType(), optional=True),
             "duration_topk": NeuralType((), IntType(), optional=True),
             "duration_temperature": NeuralType((), FloatType(), optional=True),
             "speaking_rate": NeuralType(tuple('B'), FloatType(), optional=True),
@@ -1341,8 +1432,10 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
         context_lens,
         frames_per_iter=1,
         num_iters=0,
+        audio_weight=1.0,
         audio_topk=None,
         audio_temperature=None,
+        duration_weight=1.0,
         duration_topk=None,
         duration_temperature=None,
         speaking_rate=None,
@@ -1377,11 +1470,12 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
             inputs=dur_enc,
             text_lens=dur_lens,
             frames_per_iter=frames_per_iter,
-            num_duration_iters=num_iters,
+            num_iters=num_iters,
             temperature=duration_temperature,
             topk=duration_topk,
             silence_pad_start=silence_pad_start,
             silence_pad_end=silence_pad_end,
+            infer_weight=duration_weight,
         )
         durs = self.index_to_duration(dur_indices=dur_indices, mask=dur_mask)
 
@@ -1397,9 +1491,10 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
             inputs=semantic_enc,
             audio_lens=semantic_lens,
             frames_per_iter=frames_per_iter,
-            num_audio_iters=num_iters,
+            num_iters=num_iters,
             temperature=audio_temperature,
             topk=audio_topk,
+            infer_weight=audio_weight,
         )
 
         return semantic_tokens, semantic_lens

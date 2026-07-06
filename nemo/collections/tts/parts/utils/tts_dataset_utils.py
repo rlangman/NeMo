@@ -283,6 +283,7 @@ def filter_dataset(
     min_duration: Optional[float],
     max_duration: Optional[float],
     min_words: Optional[int] = None,
+    max_text_per_second: Optional[float] = 20,
 ):
     """
     Filter out manifest entries based on duration.
@@ -314,13 +315,21 @@ def filter_dataset(
 
         if min_words:
             if "normalized_text" in entry:
-                text = entry["normalized_text"].strip()
+                text = entry["normalized_text"]
+                text = re.sub(r"\s+", " ", text)
+                text = text.strip()
                 entry["normalized_text"] = text
             elif "text" in entry:
-                text = entry["text"].strip()
+                text = entry["text"]
+                text = re.sub(r"\s+", " ", text)
+                text = text.strip()
                 entry["text"] = text
             else:
                 raise ValueError(f"Received min_words but entry has no text field: {entry}")
+
+            if max_text_per_second:
+                if len(text) > max_text_per_second * entry["duration"]:
+                    continue
 
             num_words = len(text.split(" "))
             if num_words < min_words:
@@ -887,7 +896,8 @@ def dropout_pc(text, dropout_rate):
         else:
             output_text += " "
 
-    output_text = " ".join(output_text.split())
+    output_text = re.sub(r"\s+", " ", output_text)
+    output_text = output_text.strip()
 
     if random.random() < dropout_rate:
         output_text = output_text.lower()

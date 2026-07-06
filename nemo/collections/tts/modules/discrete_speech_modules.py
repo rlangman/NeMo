@@ -427,6 +427,243 @@ class DurationDecoder(NeuralModule):
         return dur_indices
 
 
+class DurationParallelDecoder(NeuralModule):
+
+    def __init__(self, transformer, d_model, num_duration):
+        super(DurationParallelDecoder, self).__init__()
+        self.d_model = d_model
+        self.transformer = transformer
+        self.num_duration = num_duration
+
+        self.mask_emb = torch.nn.Parameter(torch.zeros([1, 1, self.d_model]))
+
+        self.dur_cond_layer = torch.nn.Linear(1, self.d_model)
+        self.layer_norm = torch.nn.LayerNorm(self.d_model)
+
+        self.layer_norm = torch.nn.LayerNorm(self.d_model)
+        self.duration_layer = torch.nn.Linear(self.d_model, self.num_duration)
+        self.layer_norm_parallel = torch.nn.LayerNorm(self.d_model)
+        self.duration_layer_prallel = torch.nn.Linear(self.d_model, self.num_duration)
+
+    @property
+    def input_types(self):
+        return {
+            "inputs": NeuralType(('B', 'T_text', 'D'), EncodedRepresentation()),
+            "dur_indices": NeuralType(('B', 'T_text'), TokenIndex()),
+            "text_mask": NeuralType(('B', 'T_text'), MaskType()),
+            "duration_maskin": NeuralType(('B', 'T_text'), MaskType()),
+            "temperature": NeuralType((), FloatType(), optional=True),
+            "topk": NeuralType((), IntType(), optional=True),
+        }
+
+    @property
+    def output_types(self):
+        return {
+            "dur_indices_pred": NeuralType(('B', 'T_text'), TokenIndex()),
+            "dur_logits": NeuralType(('B', 'C', 'T_text'), LogitsType()),
+        }
+
+    @typecheck()
+    def forward(self, inputs, dur_indices, text_mask, duration_maskin=None, temperature=None, topk=None):
+        text_mask_3d = rearrange(text_mask, 'B T -> B T 1')
+
+        dur_indices_shifted = dur_indices[:, :-1]
+        dur_indices_shifted = torch.nn.functional.pad(dur_indices_shifted, pad=(1, 0))
+
+        log_dur = torch.log(dur_indices_shifted + 1.0).detach()
+        log_dur = rearrange(log_dur, 'B T -> B T 1')
+        dur_res = self.dur_cond_layer(log_dur)
+
+        if duration_maskin is not None:
+            duration_maskin_3d = rearrange(duration_maskin, 'B T -> B T 1')
+            dur_res = torch.where(duration_maskin_3d, dur_res, self.mask_emb)
+
+        dec_input = inputs + dur_res
+        dec_input = dec_input * text_mask_3d
+
+        # [B, T, D]
+        dec_input = dec_input * rearrange(text_mask, 'B T -> B T 1')
+        dec_out = self.transformer(x=dec_input, x_mask=text_mask)['output']
+
+        # [B, T, num_codes]
+        dec_out = self.layer_norm(dec_out)
+        dur_logits = self.duration_layer(dec_out)
+        dur_logits = dur_logits * text_mask_3d
+
+        # [B, T]
+        if temperature is None:
+            dur_indices_pred = dur_logits.max(dim=2).indices
+        else:
+            dur_indices_pred = sample_tokens(logits=dur_logits, temperature=temperature, topk=topk)
+
+        dur_indices_pred = dur_indices_pred * text_mask
+        dur_logits = rearrange(dur_logits, 'B T N -> B N T')
+
+        return dur_indices_pred, dur_logits
+
+    def forward_parallel(self, inputs, text_mask, temperature=None, topk=None):
+        text_mask_3d = rearrange(text_mask, 'B T -> B T 1')
+
+        # [B, T, num_codes]
+        dec_out = self.layer_norm_parallel(inputs)
+        dur_logits = self.duration_layer_prallel(dec_out)
+        dur_logits = dur_logits * text_mask_3d
+
+        # [B, T]
+        if temperature is None:
+            dur_indices_pred = dur_logits.max(dim=2).indices
+        else:
+            dur_indices_pred = sample_tokens(logits=dur_logits, temperature=temperature, topk=topk)
+
+        dur_indices_pred = dur_indices_pred * text_mask
+        dur_logits = rearrange(dur_logits, 'B T N -> B N T')
+
+        return dur_indices_pred, dur_logits
+
+    def infer(
+        self,
+        inputs,
+        text_lens,
+        frames_per_iter,
+        infer_weight=1.0,
+        temperature=None,
+        topk=None,
+        silence_pad_start=None,
+        silence_pad_end=None,
+    ):
+        ar_weight = infer_weight / (1.0 + infer_weight)
+        parallel_weight = 1.0 / (1.0 + infer_weight)
+        batch_size = inputs.shape[0]
+        # [B, T]
+        dur_mask = get_mask_from_lengths(text_lens, pad_to_factor=frames_per_iter)
+
+        dur_lens_padded = torch.ceil(text_lens / frames_per_iter).int() * frames_per_iter
+        max_len = text_lens.max()
+        max_len_padded = dur_lens_padded.max()
+        inputs = torch.nn.functional.pad(inputs, (0, 0, 0, max_len_padded - max_len))
+
+        # [B, T]
+        dur_indices_shape = [batch_size, max_len_padded]
+        dur_indices = torch.zeros(dur_indices_shape, dtype=torch.int, device=inputs.device)
+
+        _, logits_parallel = self.forward_parallel(
+            inputs=inputs,
+            text_mask=dur_mask,
+            temperature=temperature,
+            topk=topk,
+        )
+        logits_parallel = rearrange(logits_parallel, 'B C T -> B T C')
+
+        self.transformer.reset_cache(use_cache=True, frames_per_iter=frames_per_iter)
+
+
+        for i in range(0, max_len_padded, frames_per_iter):
+            inputs_i = inputs[:, : i + frames_per_iter, :]
+            dur_indices_i = dur_indices[:, : i + frames_per_iter]
+            dur_mask_i = dur_mask[:, : i + frames_per_iter]
+
+            dur_maskin_i = dur_mask_i.clone()
+            for j in range(1, frames_per_iter):
+                dur_maskin_i[:, i + j] = False
+
+            # [B, C, T], [B, C, W, T]
+            _, logits_i = self.forward(
+                inputs=inputs_i,
+                text_mask=dur_mask_i,
+                dur_indices=dur_indices_i,
+                duration_maskin=dur_maskin_i,
+                temperature=temperature,
+                topk=topk,
+            )
+            logits_i = rearrange(logits_i, 'B C T -> B T C')
+            logits = (parallel_weight * logits_parallel[:, :i + frames_per_iter]) + (ar_weight * logits_i)
+            dur_indices_i = logits.max(dim=2).indices
+
+            for j in range(frames_per_iter):
+                dur_indices[:, i + j] = dur_indices_i[:, i + j]
+
+            if i == 0 and silence_pad_start:
+                dur_indices[:, 0] = silence_pad_start - 1
+
+        dur_indices = dur_indices[:, :max_len]
+
+        if silence_pad_end:
+            for i in range(dur_indices.shape[0]):
+                last_i = text_lens[i] - 1
+                dur_indices[i, last_i] = silence_pad_end - 1
+
+        dur_indices = dur_indices * dur_mask
+
+        self.transformer.reset_cache(use_cache=False)
+
+        return dur_indices
+
+    def infer_diffusion(
+        self,
+        inputs,
+        text_lens,
+        num_iters,
+        temperature=None,
+        topk=None,
+        silence_pad_start=None,
+        silence_pad_end=None,
+    ):
+        # [B, T]
+        text_mask = get_mask_from_lengths(text_lens)
+
+        num_tokens = inputs.shape[1]
+        # [T]
+        index_shift = num_iters * torch.arange(0, math.ceil(num_tokens / num_iters), device=inputs.device)
+        index_shift = rearrange(index_shift, 'T -> 1 T')
+
+        duration_maskin = torch.zeros_like(text_mask, dtype=torch.bool)
+        duration_maskin[:, 0] = True
+        dur_indices = torch.zeros_like(text_mask, dtype=torch.int)
+
+        if silence_pad_start:
+            for i in range(dur_indices.shape[0]):
+                dur_indices[i, 0] = silence_pad_start - 1
+
+        if silence_pad_end:
+            for i in range(dur_indices.shape[0]):
+                last_i = text_lens[i] - 1
+                dur_indices[i, last_i] = silence_pad_end - 1
+                duration_maskin[i, last_i] = True
+
+        for i in range(num_iters):
+            dur_indices_i, dur_logits = self(
+                inputs=inputs,
+                dur_indices=dur_indices,
+                text_mask=text_mask,
+                duration_maskin=duration_maskin,
+                temperature=temperature,
+                topk=topk,
+            )
+
+            top_i = torch.clamp_max(index_shift + 1, max=num_tokens - 1)
+
+            # [B, T // num_iters, T]
+            one_hot = torch.nn.functional.one_hot(top_i, num_classes=num_tokens)
+            # [B, T]
+            maskin_i = one_hot.sum(dim=1).bool()
+            maskin_i = torch.where(text_mask, maskin_i, False)
+
+            dur_indices = torch.where(maskin_i, dur_indices_i, dur_indices)
+
+            next_i = torch.clamp_max(index_shift + i + 1, max=num_tokens - 1)
+            # [B, T // num_iters, T]
+            next_one_hot = torch.nn.functional.one_hot(next_i, num_classes=num_tokens)
+            # [B, T]
+            next_maskin = next_one_hot.sum(dim=1).bool()
+            next_maskin = torch.where(text_mask, next_maskin, False)
+
+            duration_maskin = torch.logical_or(duration_maskin, next_maskin)
+
+        dur_indices = torch.where(duration_maskin, dur_indices, dur_indices_i)
+
+        return dur_indices
+
+
 class DurationDiffusionDecoder(NeuralModule):
 
     def __init__(self, transformer, d_model, num_duration, dropout_rate=0.1):

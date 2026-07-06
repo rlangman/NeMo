@@ -276,6 +276,23 @@ class Aligner(NeuralModule):
         durations = attn_hard.sum(2)
         durations = rearrange(durations, 'B 1 T -> B T')
 
+        for i in range(durations.size(0)):
+            if durations[i, 0].item() == 0:
+                torch.set_printoptions(profile="full")
+
+                print(f"Found bad durations output")
+                print("Text")
+                print(text_lens)
+                print(durations.shape)
+                print(durations[i])
+                print("Logits")
+                print(attn_logprob[i])
+                print(attn_soft[i])
+                print("Attention")
+                print(attn_hard[i])
+
+                torch.set_printoptions(profile="default")
+
         return durations, text_lens, attn_hard, attn_soft, attn_logprob
 
 
@@ -575,6 +592,261 @@ class AudioDecoder(NeuralModule):
                 topk=topk,
             )
             audio_tokens_i = rearrange(audio_tokens_i, 'B C T -> B T C')
+            audio_tokens_rearrange_i = rearrange(audio_tokens_i, 'B T C -> C B T')
+            # [B, D, T]
+            audio_codes_pred_i = vector_quantizer.decode(indices=audio_tokens_rearrange_i, input_len=audio_lens)
+            audio_codes_pred_i = rearrange(audio_codes_pred_i, 'B D T -> B T D')
+            for j in range(frames_per_iter):
+                audio_codes[:, i + j, :] = audio_codes_pred_i[:, i + j, :]
+                audio_tokens[:, i + j, :] = audio_tokens_i[:, i + j, :]
+
+        audio_tokens = audio_tokens[:, :max_len, :]
+        audio_mask_unpadded = get_mask_from_lengths(audio_lens)
+        audio_tokens = audio_tokens * audio_mask_unpadded.unsqueeze(2)
+        audio_tokens = rearrange(audio_tokens, 'B T C -> B C T')
+
+        self.transformer.reset_cache(use_cache=False)
+
+        return audio_tokens
+
+    def infer_diffusion(
+        self,
+        inputs,
+        audio_lens,
+        num_iters,
+        vector_quantizer,
+        temperature=None,
+        topk=None,
+    ):
+        # [B, T]
+        audio_mask = get_mask_from_lengths(audio_lens)
+        num_tokens = inputs.shape[1]
+
+        # [T]
+        index_shift = num_iters * torch.arange(0, math.ceil(num_tokens / num_iters), device=inputs.device)
+        index_shift = rearrange(index_shift, 'T -> 1 T')
+
+        # [B, T]
+        audio_maskin = torch.zeros_like(audio_mask, dtype=torch.bool)
+        audio_maskin[:, 0] = True
+        # [B, T, C]
+        audio_token_shape = [audio_mask.shape[0], audio_mask.shape[1], self.num_codebooks]
+        audio_tokens = torch.zeros(audio_token_shape, dtype=torch.int, device=inputs.device)
+        # [B, T, D]
+        audio_code_shape = [audio_mask.shape[0], audio_mask.shape[1], self.codebook_dim]
+        audio_codes = torch.zeros(audio_code_shape, dtype=torch.float, device=inputs.device)
+
+        for i in range(num_iters):
+            # [B, C, T], [B, C, W, T]
+            audio_tokens_i, audio_logits = self(
+                inputs=inputs,
+                audio_mask=audio_mask,
+                audio_codes=audio_codes,
+                audio_maskin=audio_maskin,
+                temperature=temperature,
+                topk=topk,
+            )
+            audio_tokens_i = rearrange(audio_tokens_i, 'B C T -> B T C')
+            audio_tokens_rearrange_i = rearrange(audio_tokens_i, 'B T C -> C B T')
+            # [B, D, T]
+            audio_codes_i = vector_quantizer.decode(
+                indices=audio_tokens_rearrange_i, input_len=audio_lens
+            )
+            audio_codes_i = rearrange(audio_codes_i, 'B D T -> B T D')
+
+            top_i = torch.clamp_max(index_shift + i, max=num_tokens - 1)
+            # [B, T // num_iters, T]
+            one_hot = torch.nn.functional.one_hot(top_i, num_classes=num_tokens)
+
+            # [B, T]
+            maskin_i = one_hot.sum(dim=1).bool()
+            maskin_i = torch.where(audio_mask, maskin_i, False)
+            maskin_3d_i = rearrange(maskin_i, 'B T -> B T 1')
+
+            audio_tokens = torch.where(maskin_3d_i, audio_tokens_i, audio_tokens)
+            audio_codes = torch.where(maskin_3d_i, audio_codes_i, audio_codes)
+
+            next_i = torch.clamp_max(index_shift + i + 1, max=num_tokens - 1)
+            # [B, T // num_iters, T]
+            next_one_hot = torch.nn.functional.one_hot(next_i, num_classes=num_tokens)
+            # [B, T]
+            next_maskin = next_one_hot.sum(dim=1).bool()
+            next_maskin = torch.where(audio_mask, next_maskin, False)
+            audio_maskin = torch.logical_or(audio_maskin, next_maskin)
+
+        audio_maskin_3d = rearrange(audio_maskin, 'B T -> B T 1')
+        audio_tokens = torch.where(audio_maskin_3d, audio_tokens, audio_tokens_i)
+        audio_tokens = rearrange(audio_tokens, 'B T C -> B C T')
+
+        return audio_tokens
+
+
+class AudioParallelDecoder(NeuralModule):
+
+    def __init__(self, transformer, d_model, num_codebooks, codebook_size, codebook_dim):
+        super(AudioParallelDecoder, self).__init__()
+        self.num_codebooks = num_codebooks
+        self.codebook_size = codebook_size
+        self.codebook_dim = codebook_dim
+        self.num_logits = self.num_codebooks * self.codebook_size
+
+        self.transformer = transformer
+
+        self.audio_hidden_layer = torch.nn.Linear(codebook_dim, d_model)
+        self.audio_cond_layer = torch.nn.Linear(d_model, d_model)
+
+        self.layer_norm = torch.nn.LayerNorm(d_model)
+        self.audio_token_layer = torch.nn.Linear(d_model, self.num_logits)
+        self.layer_norm_parallel = torch.nn.LayerNorm(d_model)
+        self.audio_token_layer_parallel = torch.nn.Linear(d_model, self.num_logits)
+
+        self.audio_mask_emb = torch.nn.Parameter(torch.zeros([1, 1, d_model]))
+
+    @property
+    def input_types(self):
+        return {
+            "inputs": NeuralType(('B', 'T_audio', 'D'), EncodedRepresentation()),
+            "audio_mask": NeuralType(('B', 'T_audio'), MaskType()),
+            "audio_codes": NeuralType(('B', 'T_audio', 'C'), EncodedRepresentation()),
+            "audio_maskin": NeuralType(('B', 'T_audio'), MaskType(), optional=True),
+            "temperature": NeuralType((), FloatType(), optional=True),
+            "topk": NeuralType((), IntType(), optional=True),
+        }
+
+    @property
+    def output_types(self):
+        return {
+            "audio_tokens": NeuralType(('B', 'C', 'T_audio'), TokenIndex()),
+            "audio_logits": NeuralType(('B', 'C', 'W', 'T_audio'), LogitsType()),
+        }
+
+    @typecheck()
+    def forward(self, inputs, audio_mask, audio_codes, audio_maskin=None, temperature=None, topk=None):
+        audio_mask_3d = rearrange(audio_mask, 'B T -> B T 1')
+
+        audio_codes_shifted = audio_codes[:, :-1, :]
+        audio_codes_shifted = torch.nn.functional.pad(audio_codes_shifted, pad=(0, 0, 1, 0))
+
+        audio_res = self.audio_hidden_layer(audio_codes_shifted)
+        audio_res = self.audio_cond_layer(audio_res)
+
+        if audio_maskin is not None:
+            audio_maskin_3d = rearrange(audio_maskin, 'B T -> B T 1')
+            audio_res = torch.where(audio_maskin_3d, audio_res, self.audio_mask_emb)
+
+        dec_input = inputs + audio_res
+        dec_input = dec_input * audio_mask_3d
+
+        # [batch_size, audio_len, hidden_dim]
+        dec_out = self.transformer(x=dec_input, x_mask=audio_mask)['output']
+        dec_out = self.layer_norm(dec_out)
+
+        # [batch_size, audio_len, num_codebook * codebook_size]
+        audio_logits = self.audio_token_layer(dec_out)
+        audio_logits = audio_logits * audio_mask_3d
+
+        # [batch_size, audio_len, num_codebook, codebook_size]
+        logit_shape = (audio_logits.shape[0], audio_logits.shape[1], self.num_codebooks, self.codebook_size)
+
+        audio_logits = torch.reshape(audio_logits, logit_shape)
+        # [batch_size, audio_len, num_codebook]
+        if temperature is None:
+            audio_tokens = audio_logits.max(dim=3).indices
+        else:
+            audio_tokens = sample_tokens(logits=audio_logits, temperature=temperature, topk=topk)
+
+        audio_tokens = audio_tokens * audio_mask_3d
+
+        audio_logits = rearrange(audio_logits, 'B T C W -> B C W T')
+        audio_tokens = rearrange(audio_tokens, 'B T C -> B C T')
+
+        return audio_tokens, audio_logits
+
+    def forward_parallel(self, inputs, audio_mask, temperature=None, topk=None):
+        audio_mask_3d = rearrange(audio_mask, 'B T -> B T 1')
+
+        # [batch_size, audio_len, num_codebook * codebook_size]
+        out = self.layer_norm_parallel(inputs)
+        audio_logits = self.audio_token_layer_parallel(out)
+        audio_logits = audio_logits * audio_mask_3d
+
+        # [batch_size, audio_len, num_codebook, codebook_size]
+        logit_shape = (audio_logits.shape[0], audio_logits.shape[1], self.num_codebooks, self.codebook_size)
+        audio_logits = torch.reshape(audio_logits, logit_shape)
+
+        # [batch_size, audio_len, num_codebook]
+        if temperature is None:
+            audio_tokens = audio_logits.max(dim=3).indices
+        else:
+            audio_tokens = sample_tokens(logits=audio_logits, temperature=temperature, topk=topk)
+
+        audio_tokens = audio_tokens * audio_mask_3d
+
+        audio_logits = rearrange(audio_logits, 'B T C W -> B C W T')
+        audio_tokens = rearrange(audio_tokens, 'B T C -> B C T')
+
+        return audio_tokens, audio_logits
+
+    def infer(
+        self,
+        inputs,
+        audio_lens,
+        frames_per_iter,
+        vector_quantizer,
+        infer_weight=1.0,
+        temperature=None,
+        topk=None,
+    ):
+        ar_weight = infer_weight / (1.0 + infer_weight)
+        parallel_weight = 1.0 / (1.0 + infer_weight)
+        batch_size = inputs.shape[0]
+        # [B, T]
+        audio_mask = get_mask_from_lengths(audio_lens, pad_to_factor=frames_per_iter)
+
+        audio_lens_padded = torch.ceil(audio_lens / frames_per_iter).int() * frames_per_iter
+        max_len = audio_lens.max()
+        max_len_padded = audio_lens_padded.max()
+        inputs = torch.nn.functional.pad(inputs, (0, 0, 0, max_len_padded - max_len))
+
+        # [B, T, C]
+        audio_token_shape = [batch_size, max_len_padded, self.num_codebooks]
+        audio_tokens = torch.zeros(audio_token_shape, dtype=torch.int, device=inputs.device)
+        # [B, T, D]
+        audio_code_shape = [batch_size, max_len_padded, self.codebook_dim]
+        audio_codes = torch.zeros(audio_code_shape, dtype=torch.float, device=inputs.device)
+
+        _, logits_parallel = self.forward_parallel(
+            inputs=inputs,
+            audio_mask=audio_mask,
+            temperature=temperature,
+            topk=topk,
+        )
+        logits_parallel = rearrange(logits_parallel, 'B C W T -> B T C W')
+
+        self.transformer.reset_cache(use_cache=True, frames_per_iter=frames_per_iter)
+
+        for i in range(0, max_len_padded, frames_per_iter):
+            inputs_i = inputs[:, :i + frames_per_iter, :]
+            audio_codes_i = audio_codes[:, : i + frames_per_iter, :]
+            audio_mask_i = audio_mask[:, : i + frames_per_iter]
+
+            audio_maskin_i = audio_mask_i.clone()
+            for j in range(1, frames_per_iter):
+                audio_maskin_i[:, i + j] = False
+
+            # [B, C, T], [B, C, W, T]
+            _, logits_i = self.forward(
+                inputs=inputs_i,
+                audio_mask=audio_mask_i,
+                audio_codes=audio_codes_i,
+                audio_maskin=audio_maskin_i,
+                temperature=temperature,
+                topk=topk,
+            )
+            logits_i = rearrange(logits_i, 'B C W T -> B T C W')
+            logits = (parallel_weight * logits_parallel[:, :i + frames_per_iter]) + (ar_weight * logits_i)
+            audio_tokens_i = logits.max(dim=3).indices
+
             audio_tokens_rearrange_i = rearrange(audio_tokens_i, 'B T C -> C B T')
             # [B, D, T]
             audio_codes_pred_i = vector_quantizer.decode(indices=audio_tokens_rearrange_i, input_len=audio_lens)
