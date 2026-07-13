@@ -70,6 +70,8 @@ class Conv1d(NeuralModule):
             self.activation = torch.nn.LeakyReLU()
         elif activation == "elu":
             self.activation = torch.nn.ELU()
+        elif activation == "gelu":
+            self.activation = torch.nn.GELU()
         else:
             raise ValueError(f"Unknown activation {activation}")
 

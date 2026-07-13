@@ -152,6 +152,61 @@ class ContextEncoder(NeuralModule):
         return context_emb, context
 
 
+class ContextEncoderV2(NeuralModule):
+
+    def __init__(
+        self,
+        input_dim,
+        output_dim,
+        d_model,
+        transformer,
+    ):
+        super(ContextEncoderV2, self).__init__()
+        self.pre_conv1 = Conv1d(in_channels=input_dim, out_channels=d_model, activation="gelu")
+        self.pre_conv2 = Conv1d(in_channels=d_model, out_channels=d_model)
+        self.transformer = transformer
+        self.input_emb = torch.nn.Parameter(torch.zeros([1, 1, d_model]))
+        self.emb_layer = torch.nn.Linear(in_features=d_model, out_features=output_dim)
+
+    @property
+    def input_types(self):
+        return {
+            "audio_codes": NeuralType(('B', 'C', 'T_audio'), EncodedRepresentation()),
+            "audio_lens": NeuralType(tuple('B'), LengthsType()),
+        }
+
+    @property
+    def output_types(self):
+        return {
+            "context_emb": NeuralType(('B', 'D'), EncodedRepresentation()),
+            "context": NeuralType(('B', 'D', 'T'), EncodedRepresentation()),
+        }
+
+    @typecheck()
+    def forward(self, audio_codes, audio_lens):
+        batch_size = audio_codes.size(0)
+        mask = get_mask_from_lengths(audio_lens)
+
+        context = self.pre_conv1(inputs=audio_codes, mask=mask)
+        context = self.pre_conv2(inputs=context, mask=mask)
+
+        context = rearrange(context, 'B D T -> B T D')
+        context_input_emb = self.input_emb.tile([batch_size, 1, 1])
+
+        context_input_len = audio_lens + 1
+        context_mask = get_mask_from_lengths(context_input_len)
+        context = torch.concat([context_input_emb, context], dim=1)
+        context = self.transformer(x=context, x_mask=context_mask)['output']
+
+        context_emb = context[:, 0, :]
+        context_emb = self.emb_layer(context_emb)
+
+        context = context[:, 1:, :]
+        context = rearrange(context, 'B T D -> B D T')
+
+        return context_emb, context
+
+
 class TextEncoder(NeuralModule):
     def __init__(
         self,
@@ -438,12 +493,11 @@ class DurationParallelDecoder(NeuralModule):
         self.mask_emb = torch.nn.Parameter(torch.zeros([1, 1, self.d_model]))
 
         self.dur_cond_layer = torch.nn.Linear(1, self.d_model)
-        self.layer_norm = torch.nn.LayerNorm(self.d_model)
 
         self.layer_norm = torch.nn.LayerNorm(self.d_model)
         self.duration_layer = torch.nn.Linear(self.d_model, self.num_duration)
         self.layer_norm_parallel = torch.nn.LayerNorm(self.d_model)
-        self.duration_layer_prallel = torch.nn.Linear(self.d_model, self.num_duration)
+        self.duration_layer_parallel = torch.nn.Linear(self.d_model, self.num_duration)
 
     @property
     def input_types(self):
@@ -505,8 +559,8 @@ class DurationParallelDecoder(NeuralModule):
         text_mask_3d = rearrange(text_mask, 'B T -> B T 1')
 
         # [B, T, num_codes]
-        dec_out = self.layer_norm_parallel(inputs)
-        dur_logits = self.duration_layer_prallel(dec_out)
+        out = self.layer_norm_parallel(inputs)
+        dur_logits = self.duration_layer_parallel(out)
         dur_logits = dur_logits * text_mask_3d
 
         # [B, T]

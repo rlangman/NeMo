@@ -19,7 +19,7 @@ import torch
 import torch.nn.functional as F
 
 from nemo.collections.tts.modules.transformer import PositionalEmbedding
-from nemo.collections.tts.modules.ffn_modules import ConvNeXtFF, PositionwiseConvFF, SwiGLUFF
+from nemo.collections.tts.modules.ffn_modules import ConvNeXtFF, ConvNeXtFFV1, PositionwiseConvFF, SwiGLUFF
 from nemo.collections.tts.modules.moe_modules import PositionwiseConvFFMoE
 
 # TODO: Move the cache implementation out of the Module class, and pass it as part of the forward so we can reset
@@ -427,6 +427,15 @@ class TransformerLayer(torch.nn.Module):
         elif ffn_type == "convnext":
             self.norm_pos_ff = torch.nn.Identity()
             self.pos_ff = ConvNeXtFF(
+                d_model=d_model,
+                d_ffn=d_ffn,
+                p_dropout=p_dropout,
+                kernel_size=kernel_size,
+                is_causal=is_causal,
+            )
+        elif ffn_type == "convnext_v1":
+            self.norm_pos_ff = torch.nn.Identity()
+            self.pos_ff = ConvNeXtFFV1(
                 d_model=d_model,
                 d_ffn=d_ffn,
                 p_dropout=p_dropout,

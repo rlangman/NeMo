@@ -146,7 +146,7 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
         self.duration_infill_dist = torch.distributions.beta.Beta(concentration1=1.0, concentration0=duration_infill_beta)
 
         self.encoder_mask_min = cfg.get("encoder_mask_min", 0.0)
-        self.encoder_mask_max = cfg.get("encoder_mask_max", 0.5)
+        self.encoder_mask_max = cfg.get("encoder_mask_max", 0.3)
         encoder_mask_beta = cfg.get("encoder_mask_beta", 2.0)
         self.encoder_mask_dist = torch.distributions.beta.Beta(concentration1=1.0, concentration0=encoder_mask_beta)
 
@@ -1113,30 +1113,17 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
         }
         self.log_dict(metrics, on_epoch=True, sync_dist=True)
 
-    def on_after_backward(self):
-        """
-        zero-out the gradients which any of them is NAN or INF
-        """
-        super().on_after_backward()
-
+    def on_before_optimizer_step(self, optimizer):
         if self.skip_nan_gradients:
-            device = next(self.parameters()).device
-            valid_gradients = torch.tensor([1], device=device, dtype=torch.float32)
-
-            # valid_gradients = True
-            for param_name, param in self.named_parameters():
+            # Iterate over the model's parameters to check gradients
+            for name, param in self.named_parameters():
                 if param.grad is not None:
-                    is_not_nan_or_inf = not (torch.isnan(param.grad).any() or torch.isinf(param.grad).any())
-                    if not is_not_nan_or_inf:
-                        valid_gradients = valid_gradients * 0
-                        break
-
-            if torch.distributed.is_initialized():
-                torch.distributed.all_reduce(valid_gradients, op=torch.distributed.ReduceOp.MIN)
-
-            if valid_gradients < 1:
-                logging.warning('detected inf or nan values in gradients! Setting gradients to zero.')
-                self.zero_grad()
+                    # Check for NaNs or Infs
+                    if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                        # Zero out the gradients to prevent corruption
+                        optimizer.zero_grad()
+                        logging.warning(f'detected inf or nan values in gradients for {name}! Setting gradients to zero.')
+                        return  # Skip the optimizer step
 
     def _setup_train_dataloader(self, dataset_config, dataloader_params):
         dataset = create_text_to_speech_dataset(
@@ -1443,6 +1430,7 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
         silence_pad_end=None,
         min_speaking_rate=-0.5,
         max_speaking_rate=0.5,
+        max_infer_length = 750,
     ):
         # [batch_size, context_len]
         context_mask = get_mask_from_lengths(context_lens)
@@ -1480,6 +1468,10 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
         durs = self.index_to_duration(dur_indices=dur_indices, mask=dur_mask)
 
         text_enc_repeated, semantic_lens = regulate_len(durs, text_enc, pace=1.0)
+
+        semantic_lens = torch.clamp_max(semantic_lens, max=max_infer_length)
+        text_enc_repeated = text_enc_repeated[:, :max_infer_length, :]
+
         semantic_mask = get_mask_from_lengths(semantic_lens)
 
         semantic_enc = self.encoder(
