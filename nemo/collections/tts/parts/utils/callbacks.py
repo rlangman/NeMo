@@ -1333,7 +1333,7 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
         text_strings = batch_dict.get("text_string")
 
         with torch.no_grad():
-            context_emb, context, context_lens = model.get_context(
+            context_emb = model.get_context(
                 audio_tokens=audio_tokens,
                 audio_lens=audio_token_lens,
                 text=text,
@@ -1343,8 +1343,6 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
                 text=text,
                 text_lens=text_lens,
                 context_emb=context_emb,
-                context=context,
-                context_lens=context_lens,
                 frames_per_iter=self.frames_per_iter,
                 num_iters=self.num_iters,
                 audio_weight=self.audio_weight,
@@ -1446,7 +1444,7 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
         text_strings = batch_dict.get("text_string")
 
         with torch.no_grad():
-            semantic_tokens_pred, context, context_lens, dur_lens, align, balign = model.infer_gta(
+            semantic_tokens_pred, dur_lens, align, balign = model.infer_gta(
                 text=text,
                 text_lens=text_lens,
                 audio_tokens=audio_tokens,

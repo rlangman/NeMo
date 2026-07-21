@@ -133,20 +133,20 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
             raise ValueError(f"text_down_sample_rate must be >= 1")
 
         # Infilling hyperparameters
-        self.semantic_infill_min = cfg.get("semantic_infill_min", 0.1)
+        self.semantic_infill_min = cfg.get("semantic_infill_min", 0.25)
         self.semantic_infill_max = cfg.get("semantic_infill_max", 1.0)
         semantic_infill_beta = cfg.get("semantic_infill_beta", 2.0)
         self.semantic_infill_dist = torch.distributions.beta.Beta(
             concentration1=1.0, concentration0=semantic_infill_beta
         )
 
-        self.duration_infill_min = cfg.get("duration_infill_min", 0.1)
+        self.duration_infill_min = cfg.get("duration_infill_min", 0.25)
         self.duration_infill_max = cfg.get("duration_infill_max", 1.0)
         duration_infill_beta = cfg.get("duration_infill_beta", 2.0)
         self.duration_infill_dist = torch.distributions.beta.Beta(concentration1=1.0, concentration0=duration_infill_beta)
 
-        self.encoder_mask_min = cfg.get("encoder_mask_min", 0.0)
-        self.encoder_mask_max = cfg.get("encoder_mask_max", 0.3)
+        self.encoder_mask_min = cfg.get("encoder_mask_min", 0.25)
+        self.encoder_mask_max = cfg.get("encoder_mask_max", 1.0)
         encoder_mask_beta = cfg.get("encoder_mask_beta", 2.0)
         self.encoder_mask_dist = torch.distributions.beta.Beta(concentration1=1.0, concentration0=encoder_mask_beta)
 
@@ -585,11 +585,11 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
             random_sample=False,
             max_len=max_len,
         )
-        context_emb, context = self.context_encoder(
+        context_emb = self.context_encoder(
             audio_codes=context_codes,
             audio_lens=context_lens,
         )
-        return context_emb, context, context_lens
+        return context_emb
 
     def get_context_audio(self, audio_tokens, audio_lens):
         batch_size = audio_tokens.shape[0]
@@ -607,11 +607,11 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
         # [batch_size, code_dim, audio_token_len]
         context_codes = self.vector_quantizer.decode(indices=context_tokens_rearrange, input_len=context_lens)
 
-        context_emb, context = self.context_encoder(
+        context_emb = self.context_encoder(
             audio_codes=context_codes,
             audio_lens=context_lens,
         )
-        return context_emb, context, context_lens
+        return context_emb
 
     @typecheck(
         input_types={
@@ -709,7 +709,7 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
                 random_sample=False,
             )
 
-        context_emb, context = self.context_encoder(
+        context_emb = self.context_encoder(
             audio_codes=context_codes,
             audio_lens=context_lens,
         )
@@ -753,10 +753,17 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
                 infill_min=self.encoder_mask_min,
                 infill_max=self.encoder_mask_max,
             )
+            dur_encoder_mask = self.create_infill_mask(
+                input_lens=dur_lens,
+                dist=self.encoder_mask_dist,
+                infill_min=self.encoder_mask_min,
+                infill_max=self.encoder_mask_max,
+            )
         else:
             semantic_maskin = None
             duration_maskin = None
             encoder_mask = None
+            dur_encoder_mask = None
             dur_noise = dur_sample
 
         semantic_token_sample = audio_token_sample[:, : self.semantic_codebook_num, :]
@@ -777,8 +784,6 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
             text=text_sample,
             text_lens=text_sample_lens,
             context_emb=context_emb,
-            context=context,
-            context_lens=context_lens,
             speaking_rate=speaking_rate,
             semantic_codes=semantic_codes,
             audio_lens=audio_token_sample_lens,
@@ -787,6 +792,7 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
             dur_indices=dur_indices,
             duration_maskin=duration_maskin,
             encoder_mask=encoder_mask,
+            dur_encoder_mask=dur_encoder_mask
         )
 
         return (
@@ -870,7 +876,7 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
             durs=durs,
             random_sample=False,
         )
-        context_emb, context = self.context_encoder(
+        context_emb = self.context_encoder(
             audio_codes=context_codes,
             audio_lens=context_lens,
         )
@@ -886,9 +892,6 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
         else:
             balign_soft = None
 
-        # [batch_size, context_len]
-        context_mask = get_mask_from_lengths(context_lens)
-        context = rearrange(context, 'B D T -> B T D')
         # [batch_size, text_len, hidden_dim]
         text_enc, dur_lens, text_durs = self.text_encoder(text=text, text_lens=text_lens, context_emb=context_emb)
 
@@ -896,7 +899,7 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
         semantic_mask = get_mask_from_lengths(semantic_lens)
 
         semantic_enc = self.encoder(
-            inputs=text_enc_repeated, audio_mask=semantic_mask, context=context, context_mask=context_mask
+            inputs=text_enc_repeated, audio_mask=semantic_mask
         )
         # [B, C_semantic, T]
         semantic_tokens = self._audio_token_infer(
@@ -908,7 +911,7 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
             topk=audio_topk,
         )
 
-        return semantic_tokens, context, context_lens, dur_lens, align_soft, balign_soft
+        return semantic_tokens, dur_lens, align_soft, balign_soft
 
     def training_step(self, batch_dict, batch_idx):
         text = batch_dict.get("text")
@@ -1247,8 +1250,6 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
         text,
         text_lens,
         context_emb,
-        context,
-        context_lens,
         speaking_rate,
         semantic_codes,
         audio_lens,
@@ -1257,12 +1258,10 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
         dur_indices,
         duration_maskin,
         encoder_mask,
+        dur_encoder_mask,
     ):
         audio_mask = get_mask_from_lengths(audio_lens)
-        # [batch_size, context_len]
-        context_mask = get_mask_from_lengths(context_lens)
 
-        context = rearrange(context, 'B D T -> B T D')
         speaking_rate_indices_pred, speaking_rate_logits = self.speaking_rate_predictor(context_emb=context_emb)
         # [batch_size, text_len, hidden_dim]
         text_enc, dur_lens, _ = self.text_encoder(text=text, text_lens=text_lens, context_emb=context_emb)
@@ -1271,8 +1270,7 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
             text_enc=text_enc,
             text_mask=dur_mask,
             speaking_rate=speaking_rate,
-            context=context,
-            context_mask=context_mask,
+            encoder_mask=dur_encoder_mask,
         )
         dur_indices_pred_pre, dur_logits_pre = self.duration_decoder.forward_parallel(inputs=dur_enc, text_mask=dur_mask)
 
@@ -1289,8 +1287,6 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
             inputs=text_enc_repeated,
             audio_mask=audio_mask,
             encoder_mask=encoder_mask,
-            context=context,
-            context_mask=context_mask,
         )
         semantic_tokens_pred_pre, semantic_logits_pre = self.decoder.forward_parallel(
             inputs=semantic_enc, audio_mask=audio_mask
@@ -1390,8 +1386,6 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
             "text": NeuralType(('B', 'T_text'), TokenIndex()),
             "text_lens": NeuralType(tuple('B'), LengthsType()),
             "context_emb": NeuralType(('B', 'D'), EncodedRepresentation()),
-            "context": NeuralType(('B', 'D', 'T_context'), EncodedRepresentation()),
-            "context_lens": NeuralType(tuple('B'), LengthsType()),
             "frames_per_iter": NeuralType((), IntType(), optional=True),
             "num_iters": NeuralType((), IntType(), optional=True),
             "audio_weight": NeuralType((), FloatType(), optional=True),
@@ -1415,8 +1409,6 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
         text,
         text_lens,
         context_emb,
-        context,
-        context_lens,
         frames_per_iter=1,
         num_iters=0,
         audio_weight=1.0,
@@ -1432,11 +1424,6 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
         max_speaking_rate=0.5,
         max_infer_length = 750,
     ):
-        # [batch_size, context_len]
-        context_mask = get_mask_from_lengths(context_lens)
-
-        context = rearrange(context, 'B D T -> B T D')
-
         if speaking_rate is None:
             speaking_rate_indices, _ = self.speaking_rate_predictor(context_emb=context_emb)
             speaking_rate = self.speaking_rate_quantizer.get_codes(indices=speaking_rate_indices)
@@ -1450,8 +1437,6 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
             text_enc=text_enc,
             text_mask=dur_mask,
             speaking_rate=speaking_rate,
-            context=context,
-            context_mask=context_mask,
         )
 
         dur_indices = self._duration_infer(
@@ -1475,7 +1460,7 @@ class DiscreteSpeechAutoregressiveModel(ModelPT):
         semantic_mask = get_mask_from_lengths(semantic_lens)
 
         semantic_enc = self.encoder(
-            inputs=text_enc_repeated, audio_mask=semantic_mask, context=context, context_mask=context_mask
+            inputs=text_enc_repeated, audio_mask=semantic_mask
         )
 
         # [B, C_semantic, T]
