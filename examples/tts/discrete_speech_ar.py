@@ -25,6 +25,9 @@ def main(cfg):
     exp_manager(trainer, cfg.get("exp_manager", None))
     model = DiscreteSpeechAutoregressiveModel(cfg=cfg.model, trainer=trainer)
     model.maybe_init_from_pretrained_checkpoint(cfg=cfg)
+    if trainer.logger is not None:
+        lr_logger = pl.callbacks.LearningRateMonitor()
+        trainer.callbacks.append(lr_logger)
     trainer.fit(model)
 
 
