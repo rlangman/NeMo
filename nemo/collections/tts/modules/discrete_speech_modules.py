@@ -537,3 +537,324 @@ class AudioEncoder(NeuralModule):
         audio_enc = self.transformer(x=audio_enc, x_mask=audio_mask)['output']
 
         return audio_enc
+
+
+class DiscreteSpeechDecoder(NeuralModule):
+
+    def __init__(
+        self,
+        parallel_transformer,
+        semantic_transformer,
+        acoustic_transformer,
+        input_dim,
+        d_model,
+        num_semantic_codebooks,
+        num_acoustic_codebooks,
+        codebook_size,
+        codebook_dim,
+        semantic_dim,
+        infill_min=0.25,
+        infill_max=1.0,
+    ):
+        super(DiscreteSpeechDecoder, self).__init__()
+        self.num_semantic_codebooks = num_semantic_codebooks
+        self.num_acoustic_codebooks = num_acoustic_codebooks
+        self.codebook_size = codebook_size
+        self.codebook_dim = codebook_dim
+        self.semantic_dim = semantic_dim
+        self.num_semantic_logits = self.num_semantic_codebooks * self.codebook_size
+        self.num_acoustic_logits = self.num_acoustic_codebooks * self.codebook_size
+
+        self.input_layer = torch.nn.Linear(input_dim, d_model)
+
+        self.parallel_transformer = parallel_transformer
+        self.semantic_transformer = semantic_transformer
+        self.acoustic_transformer = acoustic_transformer
+
+        self.audio_hidden_layer = torch.nn.Linear(codebook_dim, d_model)
+        self.audio_cond_layer = torch.nn.Linear(d_model, d_model)
+
+        self.semantic_hidden_layer = torch.nn.Linear(semantic_dim, d_model)
+        self.semantic_cond_layer = torch.nn.Linear(d_model, d_model)
+
+        self.semantic_layer_norm_parallel = torch.nn.LayerNorm(d_model)
+        self.semantic_token_layer_parallel = torch.nn.Linear(d_model, self.num_semantic_logits)
+
+        self.semantic_layer_norm = torch.nn.LayerNorm(d_model)
+        self.semantic_token_layer = torch.nn.Linear(d_model, self.num_semantic_logits)
+        
+        self.acoustic_layer_norm = torch.nn.LayerNorm(d_model)
+        self.acoustic_token_layer = torch.nn.Linear(d_model, self.num_acoustic_logits)
+
+        self.input_mask_emb = torch.nn.Parameter(torch.zeros([1, 1, d_model]))
+        self.audio_mask_emb = torch.nn.Parameter(torch.zeros([1, 1, d_model]))
+        self.semantic_mask_emb = torch.nn.Parameter(torch.zeros([1, 1, d_model]))
+
+        self.infill_min = infill_min
+        self.infill_max = infill_max
+        self.infill_dist = torch.distributions.beta.Beta(concentration1=1.0, concentration0=2.0)
+
+    def create_infill_mask(self, input_lens):
+        batch_size = input_lens.shape[0]
+        len_mask = get_mask_from_lengths(input_lens)
+        max_len = len_mask.shape[1]
+
+        infill_percent = self.infill_dist.sample(sample_shape=torch.Size([batch_size])).to(input_lens.device)
+        infill_percent = self.infill_min + (self.infill_max - self.infill_min) * infill_percent
+        infill_len = infill_percent * input_lens.float()
+        infill_rank = torch.clamp_min(infill_len - 1, 0).long()
+        infill_rank = rearrange(infill_rank, 'B -> B 1')
+
+        # [batch_size, time]
+        infill_vals = torch.rand(size=len_mask.shape, device=input_lens.device)
+        infill_vals = infill_vals * len_mask
+        infill_topk = torch.topk(infill_vals, k=max_len, dim=1, sorted=True).values
+        infill_min_val = torch.gather(infill_topk, index=infill_rank, dim=1)
+        infill_mask = infill_vals >= infill_min_val
+
+        infill_mask = infill_mask * len_mask
+
+        return infill_mask
+
+    @property
+    def input_types(self):
+        return {
+            "inputs": NeuralType(('B', 'T_audio', 'D'), EncodedRepresentation()),
+            "audio_lens": NeuralType(tuple('B'), LengthsType()),
+            "audio_codes": NeuralType(('B', 'T_audio', 'C'), EncodedRepresentation()),
+            "semantic_codes": NeuralType(('B', 'T_audio', 'C'), EncodedRepresentation()),
+        }
+
+    @property
+    def output_types(self):
+        return {
+            "semantic_tokens_parallel": NeuralType(('B', 'C', 'T_audio'), TokenIndex()),
+            "semantic_logits_parallel": NeuralType(('B', 'C', 'W', 'T_audio'), LogitsType()),
+            "semantic_tokens": NeuralType(('B', 'C', 'T_audio'), TokenIndex()),
+            "semantic_logits": NeuralType(('B', 'C', 'W', 'T_audio'), LogitsType()),
+            "acoustic_tokens": NeuralType(('B', 'C', 'T_audio'), TokenIndex()),
+            "acoustic_logits": NeuralType(('B', 'C', 'W', 'T_audio'), LogitsType()),
+        }
+
+    @typecheck()
+    def forward(self, inputs, audio_lens, audio_codes, semantic_codes):
+        audio_mask = get_mask_from_lengths(audio_lens)
+        audio_mask_3d = rearrange(audio_mask, 'B T -> B T 1')
+
+        hidden_state = self.input_layer(inputs)
+
+        if self.training:
+            input_infill_mask = self.create_infill_mask(input_lens=audio_lens)
+            input_infill_mask = rearrange(input_infill_mask, 'B T -> B T 1')
+            hidden_state = torch.where(input_infill_mask, hidden_state, self.input_mask_emb)
+
+        hidden_state = self.parallel_transformer(x=hidden_state, x_mask=audio_mask)['output']
+
+        semantic_tokens_parallel, semantic_logits_parallel = self._compute_logits(
+            inputs=hidden_state,
+            audio_mask=audio_mask,
+            layer_norm=self.semantic_layer_norm_parallel,
+            projection=self.semantic_token_layer_parallel,
+            num_codebooks=self.num_semantic_codebooks,
+        )
+
+        audio_codes_shifted = audio_codes[:, :-1, :]
+        audio_codes_shifted = torch.nn.functional.pad(audio_codes_shifted, pad=(0, 0, 1, 0))
+
+        audio_res = self.audio_hidden_layer(audio_codes_shifted)
+        audio_res = self.audio_cond_layer(audio_res)
+
+        if self.training:
+            infill_mask = self.create_infill_mask(input_lens=audio_lens)
+            infill_mask = rearrange(infill_mask, 'B T -> B T 1')
+            audio_res = torch.where(infill_mask, audio_res, self.audio_mask_emb)
+
+        hidden_state = hidden_state + audio_res
+        hidden_state = hidden_state * audio_mask_3d
+
+        # [batch_size, audio_len, hidden_dim]
+        hidden_state = self.semantic_transformer(x=hidden_state, x_mask=audio_mask)['output']
+
+        semantic_tokens, semantic_logits= self._compute_logits(
+            inputs=hidden_state,
+            audio_mask=audio_mask,
+            layer_norm=self.semantic_layer_norm,
+            projection=self.semantic_token_layer,
+            num_codebooks=self.num_semantic_codebooks,
+        )
+
+        semantic_res = self.semantic_hidden_layer(semantic_codes)
+        semantic_res = self.semantic_cond_layer(semantic_res)
+
+        #if self.training:
+        #    semantic_infill_mask = self.create_infill_mask(input_lens=audio_lens)
+        #    semantic_infill_mask = rearrange(semantic_infill_mask, 'B T -> B T 1')
+        #    semantic_res = torch.where(semantic_infill_mask, semantic_res, self.semantic_mask_emb)
+
+        if self.training:
+            semantic_res = torch.where(infill_mask, semantic_res, self.semantic_mask_emb)
+
+        hidden_state = hidden_state + semantic_res
+        hidden_state = hidden_state * audio_mask_3d
+
+        # [batch_size, audio_len, hidden_dim]
+        hidden_state = self.acoustic_transformer(x=hidden_state, x_mask=audio_mask)['output']
+
+        acoustic_tokens, acoustic_logits = self._compute_logits(
+            inputs=hidden_state,
+            audio_mask=audio_mask,
+            layer_norm=self.acoustic_layer_norm,
+            projection=self.acoustic_token_layer,
+            num_codebooks=self.num_acoustic_codebooks,
+        )
+
+        return semantic_tokens_parallel, semantic_logits_parallel, semantic_tokens, semantic_logits, acoustic_tokens, acoustic_logits
+
+
+    def _compute_logits(self, inputs, audio_mask, layer_norm, projection, num_codebooks):
+        audio_mask_3d = rearrange(audio_mask, 'B T -> B T 1')
+
+        # [batch_size, audio_len, num_codebook * codebook_size]
+        out = layer_norm(inputs)
+        audio_logits = projection(out)
+        audio_logits = audio_logits * audio_mask_3d
+
+        # [batch_size, audio_len, num_codebook, codebook_size]
+        logit_shape = (audio_logits.shape[0], audio_logits.shape[1], num_codebooks, self.codebook_size)
+        audio_logits = torch.reshape(audio_logits, logit_shape)
+
+        # [batch_size, audio_len, num_codebook]
+        audio_tokens = audio_logits.max(dim=3).indices
+        audio_tokens = audio_tokens * audio_mask_3d
+
+        audio_logits = rearrange(audio_logits, 'B T C W -> B C W T')
+        audio_tokens = rearrange(audio_tokens, 'B T C -> B C T')
+
+        return audio_tokens, audio_logits
+
+    def infer(
+        self,
+        inputs,
+        audio_lens,
+        frames_per_iter,
+        vector_quantizer,
+        infer_weight=1.0,
+    ):
+        ar_weight = infer_weight / (1.0 + infer_weight)
+        parallel_weight = 1.0 / (1.0 + infer_weight)
+        batch_size = inputs.shape[0]
+        # [B, T]
+        audio_mask = get_mask_from_lengths(audio_lens, pad_to_factor=frames_per_iter)
+
+        audio_lens_padded = torch.ceil(audio_lens / frames_per_iter).int() * frames_per_iter
+        max_len = audio_lens.max()
+        max_len_padded = audio_lens_padded.max()
+        inputs = torch.nn.functional.pad(inputs, (0, 0, 0, max_len_padded - max_len))
+
+        # [B, T, C]
+        audio_token_shape = [batch_size, max_len_padded, self.num_semantic_codebooks + self.num_acoustic_codebooks]
+        audio_tokens = torch.zeros(audio_token_shape, dtype=torch.int, device=inputs.device)
+        # [B, T, D]
+        audio_code_shape = [batch_size, max_len_padded, self.codebook_dim]
+        audio_codes = torch.zeros(audio_code_shape, dtype=torch.float, device=inputs.device)
+        # [B, T, D]
+        semantic_code_shape = [batch_size, max_len_padded, self.semantic_dim]
+        semantic_codes = torch.zeros(semantic_code_shape, dtype=torch.float, device=inputs.device)
+
+        hidden_state_input = self.input_layer(inputs)
+        hidden_state_input = self.parallel_transformer(x=hidden_state_input, x_mask=audio_mask)['output']
+
+        _, logits_parallel = self._compute_logits(
+            inputs=hidden_state_input,
+            audio_mask=audio_mask,
+            layer_norm=self.semantic_layer_norm_parallel,
+            projection=self.semantic_token_layer_parallel,
+            num_codebooks=self.num_semantic_codebooks,
+        )
+        logits_parallel = rearrange(logits_parallel, 'B C W T -> B T C W')
+
+        self.semantic_transformer.reset_cache(use_cache=True, frames_per_iter=frames_per_iter)
+        self.acoustic_transformer.reset_cache(use_cache=True, frames_per_iter=frames_per_iter)
+
+        for i in range(0, max_len_padded, frames_per_iter):
+            audio_codes_i = audio_codes[:, : i + frames_per_iter, :]
+            audio_mask_i = audio_mask[:, : i + frames_per_iter]
+            hidden_state_i = hidden_state_input[:, : i + frames_per_iter, :]
+
+            audio_maskin_i = audio_mask_i.clone()
+            for j in range(1, frames_per_iter):
+                audio_maskin_i[:, i + j] = False
+            audio_maskin_i = rearrange(audio_maskin_i, 'B T -> B T 1')
+
+            audio_codes_shifted = audio_codes_i[:, :-1, :]
+            audio_codes_shifted = torch.nn.functional.pad(audio_codes_shifted, pad=(0, 0, 1, 0))
+            audio_res = self.audio_hidden_layer(audio_codes_shifted)
+            audio_res = self.audio_cond_layer(audio_res)
+            audio_res = torch.where(audio_maskin_i, audio_res, self.audio_mask_emb)
+
+            hidden_state_i = hidden_state_i + audio_res
+            hidden_state_i = hidden_state_i * rearrange(audio_mask_i, 'B T -> B T 1')
+
+            # [batch_size, audio_len, hidden_dim]
+            hidden_state_i = self.semantic_transformer(x=hidden_state_i, x_mask=audio_mask_i)['output']
+
+            _, logits_i = self._compute_logits(
+                inputs=hidden_state_i,
+                audio_mask=audio_mask_i,
+                layer_norm=self.semantic_layer_norm,
+                projection=self.semantic_token_layer,
+                num_codebooks=self.num_semantic_codebooks,
+            )
+            logits_i = rearrange(logits_i, 'B C W T -> B T C W')
+            logits = (parallel_weight * logits_parallel[:, :i + frames_per_iter]) + (ar_weight * logits_i)
+            semantic_tokens_i = logits.max(dim=3).indices
+
+            semantic_tokens_rearrange_i = rearrange(semantic_tokens_i, 'B T C -> C B T')
+            # [B, D, T]
+            semantic_codes_pred_i = vector_quantizer.decode(indices=semantic_tokens_rearrange_i, input_len=audio_lens)
+            semantic_codes_pred_i = rearrange(semantic_codes_pred_i, 'B D T -> B T D')
+
+            for j in range(frames_per_iter):
+                semantic_codes[:, i + j, :] = semantic_codes_pred_i[:, i + j, :]
+
+            semantic_codes_i = semantic_codes[:, : i + frames_per_iter, :]
+
+            semantic_res = self.semantic_hidden_layer(semantic_codes_i)
+            semantic_res = self.semantic_cond_layer(semantic_res)
+            semantic_res = torch.where(audio_maskin_i, semantic_res, self.semantic_mask_emb)
+
+            hidden_state_i = hidden_state_i + semantic_res
+            hidden_state_i = hidden_state_i * rearrange(audio_mask_i, 'B T -> B T 1')
+
+            # [batch_size, audio_len, hidden_dim]
+            hidden_state_i = self.acoustic_transformer(x=hidden_state_i, x_mask=audio_mask_i)['output']
+
+            acoustic_tokens_i, _ = self._compute_logits(
+                inputs=hidden_state_i,
+                audio_mask=audio_mask_i,
+                layer_norm=self.acoustic_layer_norm,
+                projection=self.acoustic_token_layer,
+                num_codebooks=self.num_acoustic_codebooks,
+            )
+            acoustic_tokens_i = rearrange(acoustic_tokens_i, 'B C T -> B T C')
+            acoustic_tokens_rearrange_i = rearrange(acoustic_tokens_i, 'B T C -> C B T')
+            # [B, D, T]
+            acoustic_codes_pred_i = vector_quantizer.decode(indices=acoustic_tokens_rearrange_i, input_len=audio_lens)
+            acoustic_codes_pred_i = rearrange(acoustic_codes_pred_i, 'B D T -> B T D')
+
+
+            for j in range(frames_per_iter):
+                audio_codes_pred_i = torch.concat([semantic_codes_pred_i, acoustic_codes_pred_i], dim=2)
+                audio_tokens_i = torch.concat([semantic_tokens_i, acoustic_tokens_i], dim=2)
+                audio_codes[:, i + j, :] = audio_codes_pred_i[:, i + j, :]
+                audio_tokens[:, i + j, :] = audio_tokens_i[:, i + j, :]
+
+        audio_tokens = audio_tokens[:, :max_len, :]
+        audio_mask_unpadded = get_mask_from_lengths(audio_lens)
+        audio_tokens = audio_tokens * audio_mask_unpadded.unsqueeze(2)
+        audio_tokens = rearrange(audio_tokens, 'B T C -> B C T')
+
+        self.semantic_transformer.reset_cache(use_cache=False)
+        self.acoustic_transformer.reset_cache(use_cache=False)
+
+        return audio_tokens

@@ -23,6 +23,7 @@ from nemo.collections.tts.models.easy_magpietts import EasyMagpieTTSModel
 from nemo.collections.tts.models.easy_magpietts_inference import EasyMagpieTTSInferenceModel
 from nemo.collections.tts.models.easy_magpietts_preference_optimization import EasyMagpieTTSModelOnlinePO
 from nemo.collections.tts.models.discrete_speech import DiscreteSpeechModel
+from nemo.collections.tts.models.discrete_speech_acoustic import DiscreteSpeechAcousticModel
 from nemo.collections.tts.models.discrete_speech_ar import DiscreteSpeechAutoregressiveModel
 from nemo.collections.tts.models.fastpitch import FastPitchModel
 from nemo.collections.tts.models.fastpitch_ssl import FastPitchModel_SSL
@@ -41,6 +42,7 @@ __all__ = [
     "AudioCodecModel",
     "FastPitchModel",
     "DiscreteSpeechModel",
+    "DiscreteSpeechAcousticModel",
     "DiscreteSpeechAutoregressiveModel",
     "FastPitchModel_SSL",
     "SSLDisentangler",
