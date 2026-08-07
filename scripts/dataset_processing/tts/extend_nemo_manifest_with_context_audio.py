@@ -19,6 +19,7 @@ import os
 import random
 import re
 from collections import defaultdict
+import math
 from pathlib import Path
 
 import lightning.pytorch as pl
@@ -339,11 +340,20 @@ class EmbeddingSimilarityExtractorSharded(pl.LightningModule):
             all_embeddings = torch.stack([item['embedding'] for item in all_items_to_process])
             context_embeddings = torch.stack([item['embedding'] for item in context_pool_items])
 
-            all_embeddings_norm = torch.nn.functional.normalize(all_embeddings, p=2, dim=1)
             context_embeddings_norm = torch.nn.functional.normalize(context_embeddings, p=2, dim=1)
+            context_embeddings_norm = context_embeddings_norm.transpose(0, 1)
 
-            # Compute N×M similarity matrix: each row is similarities for one item against all context candidates
-            similarity_matrix = torch.matmul(all_embeddings_norm, context_embeddings_norm.transpose(0, 1))
+            similarity_matrix_list = []
+            num_batches = int(math.ceil(all_embeddings.shape[0] / self.max_speaker_items))
+            for i in range(num_batches):
+                start_i = i * self.max_speaker_items
+                end_i = (i + 1) * self.max_speaker_items
+                all_embeddings_norm = torch.nn.functional.normalize(all_embeddings[start_i:end_i], p=2, dim=1)
+
+                # Compute N×M similarity matrix: each row is similarities for one item against all context candidates
+                similarity_matrix_i = torch.matmul(all_embeddings_norm, context_embeddings_norm)
+                similarity_matrix_list.append(similarity_matrix_i)
+            similarity_matrix = torch.concat(similarity_matrix_list, dim=0)
 
             # Mask positions where items are identical (same item appearing in both N and M sets)
             # Using original indices as identifiers. This prevents an item from being selected as its own context.
@@ -382,14 +392,14 @@ class EmbeddingSimilarityExtractorSharded(pl.LightningModule):
                         break
 
                     # If SSIM is below threshold, stop searching for this item
-                    if candidate_ssim < self.context_min_ssim or candidate_ssim > self.context_max_ssim:
+                    if candidate_ssim < self.context_min_ssim:
                         break
 
                     # Check duration if SSIM is acceptable
                     best_meta_dict = context_pool_items[context_pool_idx]['metadata']
                     candidate_duration = best_meta_dict["duration"]
 
-                    if candidate_duration >= self.context_min_duration:
+                    if (candidate_ssim <= self.context_max_ssim) and (candidate_duration >= self.context_min_duration):
                         # Found a suitable candidate, update record and stop searching for this item
                         record_update_dict = {
                             "context_speaker_similarity": round(candidate_ssim, 3),
@@ -480,93 +490,12 @@ class EmbeddingSimilarityExtractorSharded(pl.LightningModule):
             torch.distributed.barrier()  # Wait for all ranks to finish writing files
 
 
-def _parse_speaker_id_libritts(record):
-    """
-    libritts format: audio_filepath = "{subset}/{speaker_id}/{chapter_id}/{speaker_id}_{chapter_id}_{utterance_id}_{segment_id}.wav"
-        e.g. "train-clean-100/89/218/89_218_000014_000003.wav"
-    re-organized speaker_id: "{subset}_{speaker_id}_{chapter_id}"
-        e.g. "train-clean-100_89_218"
-    """
-    parts = record['audio_filepath'].lower().split('/')
-    return f"{parts[0]}_{parts[1]}_{parts[2]}"
-
-
-def _parse_speaker_id_hifitts(record):
-    """
-    hifitts format: audio_filepath = "{speaker_id}_{audio_quality}/{book_id}/{chapter_name}_{segment_id}.wav"
-        e.g. "11614_other/12352/prideofjennico_01_castle_0000.flac"
-    re-organized speaker_id: "{speaker_id}_{audio_quality}_{book_id}_{chapter_name}"
-        e.g. "11614_other_12352_prideofjennico_01_castle"
-    """
-    parts = record['audio_filepath'].lower().split('/')
-    chapter_name = parts[-1].rsplit('_', 1)[0]
-    return f"{parts[0]}_{parts[1]}_{chapter_name}"
-
-
-def _parse_speaker_id_hifitts2(record):
-    """
-    hifitts2 format: audio_filepath = "{speaker_id}/{book_id}/{speaker_id}_{book_id}_{chapter_name}_{segment_id}.wav"
-        e.g. "100/2315/100_2315_sea_fairies_0812_librivox-01_baum_sea_fairies_0.flac"
-    re-organized speaker_id: "{speaker_id}_{book_id}_{chapter_name}"
-        e.g. "100_2315_sea_fairies_0812_librivox-01_baum_sea_fairies"
-    """
-    parts = record['audio_filepath'].lower().split('/')
-    return parts[-1].rsplit('_', 1)[0]
-
-
-def _parse_speaker_id_nvyt2505(record):
-    """
-    nvyt2505 format: audio_filepath = "NVYT_40K_audios_wav/{utterance_id}.wav", which does not contain speaker_id.
-        e.g. "NVYT_40K_audios_wav/Thg50o7gmsk.wav"
-    But we can parse the speaker_id from: speaker = "| Language:en Dataset:NVYT_2505 Speaker:Thg50o7gmsk_SPEAKER_00 |".
-    re-organized speaker_id: "{parsed_speaker_id}"
-        e.g. "thg50o7gmsk_speaker_00"
-    """
-    speaker_regex = re.compile(r'Speaker:([^ |]+)')
-    match = speaker_regex.search(record['speaker'])
-    if not match:
-        raise ValueError(f"Failed to parse speaker_id from record: {record}")
-    return match.group(1).lower()
-
-
-def _parse_speaker_id_rivaLindyRodney(record):
-    """
-    rivaLindyRodney format: audio_filepath = "{speaker}/44khz/{emotion}/{speaker}_{emotion}_{utterance_id}.wav"
-        e.g. "Lindy/44khz/WIZWIKI/LINDY_WIZWIKI_004161.wav"
-    re-organized speaker_id: "{speaker}_{emotion}"
-        e.g. "lindy_wizwiki"
-    """
-    parts = record['audio_filepath'].lower().split('/')
-    return f"{parts[0]}_{parts[2]}"
-
-
-def _parse_speaker_id_rivaEmmaMeganSeanTom(record):
-    """
-    rivaEmmaMeganSeanTom format: audio_filepath = "{speaker}/22_kHz/{speaker}_{emotion}_{utterance_id}.wav"
-        e.g. "Emma/22_kHz/Emma_Sad_Intense_Correlated_00147.wav"
-    re-organized speaker_id: "{speaker}_{emotion}"
-        e.g. "emma_sad_intense_correlated"
-    """
-    parts = record['audio_filepath'].lower().split('/')
-    return parts[2].rsplit('_', 1)[0]
-
-
-def _parse_speaker_id_jhsdGtc20Amp20Keynote(record):
-    """
-    jhsdGtc20Amp20Keynote format: audio_filepath = "{keynote_event}_KEYNOTE-VOOnly-44khz-16bit-mono_{utterance_id}.wav"
-        e.g. "AMP20_KEYNOTE-VOOnly-44khz-16bit-mono_12.wav"
-    re-organized speaker_id: "{keynote_event}"
-        e.g. "AMP20"
-    """
-    return record['audio_filepath'].lower().rsplit('_', 2)[0]
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", type=str, required=True)
     parser.add_argument("--audio-base-dir", type=str, required=True)
     parser.add_argument("--output-dir", type=str, required=True, help="Directory to save rank-specific manifests.")
-    parser.add_argument("--flush-threshold-items", type=int, default=10000)
+    parser.add_argument("--flush-threshold-items", type=int, default=20000)
     parser.add_argument(
         "--context-min-duration", type=float, default=3.0, help="Minimum duration for a context audio segment."
     )
@@ -579,7 +508,7 @@ def main():
     parser.add_argument(
         "--max-speaker-items",
         type=int,
-        default=10000,
+        default=20000,
         help="Maximum size of context pool per speaker to prevent OOM. If a speaker has more items, a random sample will be used as context pool, but all items will still be processed. Default: None (no limit, potential OOM risk).",
     )
     parser.add_argument("--devices", type=int, default=-1)
@@ -687,14 +616,6 @@ def main():
                 # 1. Apply duration filter
                 if rec.get("duration") is None or rec.get("duration") < min_duration_in_sec_required:
                     continue
-
-                '''
-                # 2. Apply speaker format check
-                if not check_speaker_format(rec["speaker"]):
-                    msg = f"Invalid speaker format for record: {rec['speaker']}, File: {rec['audio_filepath']}(offset={rec['offset']}, duration={rec['duration']})."
-                    logger.error(msg)
-                    raise ValueError(msg)
-                '''
 
                 # 3. Parse speaker ID and add to map
                 rec['parsed_speaker_id'] = rec["speaker"]
