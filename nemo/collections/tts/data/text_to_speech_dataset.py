@@ -537,9 +537,6 @@ class TarredTextToSpeechDataset(IterableDataset):
             text = entry["text"]
             context_text = entry["context_audio_text"]
 
-            # Remove all non-alphanumeric characters, making sure to keep accented and foreign characters
-            text = "".join([c for c in text if c == " " or c.isalnum()])
-
         # Remove all non-alphanumeric characters, making sure to keep accented and foreign characters
         context_text = "".join([c for c in context_text if c == " " or c.isalnum()])
         context_text = context_text.lower().strip()

@@ -775,7 +775,7 @@ def main():
         num_workers=args.num_workers,
         shuffle=False,
         collate_fn=dataset.collate_fn,
-        pin_memory=True,
+        pin_memory=False,
     )
 
     model = EmbeddingSimilarityExtractorSharded(
