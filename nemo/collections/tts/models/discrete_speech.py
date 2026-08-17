@@ -116,6 +116,10 @@ class DiscreteSpeechModel(ModelPT):
         else:
             raise ValueError(f"text_down_sample_rate must be >= 1")
 
+        self.freeze_aligner = cfg.get("freeze_aligner", False)
+        if self.freeze_aligner:
+            self.aligner.eval()
+            self.aligner.freeze()
 
         self.duration_infill_min = cfg.get("duration_infill_min", 0.25)
         self.duration_infill_max = cfg.get("duration_infill_max", 1.0)
@@ -130,7 +134,7 @@ class DiscreteSpeechModel(ModelPT):
         self.duration_loss_scale = cfg.get("duration_loss_scale", 0.01)
         self.duration_loss_fn = MaskedSoftmax()
 
-        self.speaking_rate_loss_scale = cfg.get("speaking_rate_loss_scale", 1e-3)
+        self.speaking_rate_loss_scale = cfg.get("speaking_rate_loss_scale", 1e-4)
         self.speaking_rate_loss_fn = SpeakingRateLoss()
 
         # Aligner losses
@@ -238,7 +242,7 @@ class DiscreteSpeechModel(ModelPT):
             text_len=context_text_len,
             audio_codes=context_codes,
             audio_len=context_len,
-            context_emb=context_emb,
+            #context_emb=context_emb,
         )
         _, speaking_rate_indices = self.get_speaking_rate(text_len=context_text_len, durs=context_durs, dur_len=context_dur_len)
         speaking_rate_indices = speaking_rate_indices.detach()
@@ -254,7 +258,7 @@ class DiscreteSpeechModel(ModelPT):
             text_len=text_len,
             audio_codes=audio_codes,
             audio_len=audio_len,
-            context_emb=context_emb,
+            #context_emb=context_emb,
         )
         speaking_rate, _ = self.get_speaking_rate(text_len=text_len, durs=durs, dur_len=dur_len)
         speaking_rate = speaking_rate.detach()
@@ -400,9 +404,11 @@ class DiscreteSpeechModel(ModelPT):
             + train_dur_loss
             + train_dur_loss_pre
             + train_speaking_rate_loss
-            + train_ctc_loss
-            + train_bin_loss
         )
+
+        if not self.freeze_aligner:
+            loss += train_ctc_loss + train_bin_loss
+
 
         metrics = {
             "t_semantic_token_loss": semantic_token_loss,
@@ -525,7 +531,7 @@ class DiscreteSpeechModel(ModelPT):
 
     def on_before_optimizer_step(self, optimizer):
         for name, param in self.named_parameters():
-            if param.grad is None:
+            if param.grad is None and param.requires_grad:
                 print(f"No gradient found for {name}")
 
         if self.skip_nan_gradients:

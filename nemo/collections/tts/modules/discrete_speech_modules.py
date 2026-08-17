@@ -419,7 +419,7 @@ class TextEncoder(NeuralModule):
         space_dur,
         infill_min=1.0,
         infill_max=1.0,
-        infill_beta=1.0,
+        infill_beta=2.0,
     ):
         super(TextEncoder, self).__init__()
         self.d_model = d_model
@@ -504,12 +504,9 @@ class DurationDecoder(NeuralModule):
         input_dim,
         d_model,
         num_duration,
-        infill_min=0.25,
+        infill_min=0.1,
         infill_max=1.0,
         infill_beta=2.0,
-        input_infill_min=1.0,
-        input_infill_max=1.0,
-        input_infill_beta=1.0,
     ):
         super(DurationDecoder, self).__init__()
         self.d_model = d_model
@@ -526,16 +523,6 @@ class DurationDecoder(NeuralModule):
 
         self.layer_norm_parallel = torch.nn.LayerNorm(self.d_model)
         self.duration_layer_parallel = torch.nn.Linear(self.d_model, self.num_duration)
-
-        if input_infill_min < 1.0:
-            self.input_masking = FeatureMasking(
-                d_model=self.d_model,
-                infill_min=input_infill_max,
-                infill_max=input_infill_max,
-                infill_beta=input_infill_beta
-            )
-        else:
-            self.input_masking = None
 
         self.duration_masking = FeatureMasking(
             d_model=self.d_model, infill_min=infill_min, infill_max=infill_max, infill_beta=infill_beta
@@ -559,7 +546,7 @@ class DurationDecoder(NeuralModule):
 
         return dur_indices_pred, dur_logits
 
-    def _forward_parallel(self, inputs, dur_mask, speaking_rate, input_mask=None):
+    def _forward_parallel(self, inputs, dur_mask, speaking_rate):
         speaking_rate = rearrange(speaking_rate, 'B -> B 1 1')
         # [B, T, hidden_dim]
         sr_res = self.speaking_rate_cond_layer(speaking_rate)
@@ -567,9 +554,6 @@ class DurationDecoder(NeuralModule):
         hidden_state = self.input_layer(inputs)
         hidden_state = hidden_state + sr_res
         hidden_state = hidden_state * rearrange(dur_mask, 'B T -> B T 1')
-
-        if input_mask is not None:
-            hidden_state = self.input_masking(inputs=hidden_state, mask=input_mask)
 
         hidden_state = self.parallel_transformer(x=hidden_state, x_mask=dur_mask)['output']
 
@@ -631,13 +615,8 @@ class DurationDecoder(NeuralModule):
     def forward(self, inputs, dur_len, dur_indices, speaking_rate):
         dur_mask = get_mask_from_lengths(dur_len)
 
-        if self.training and self.input_masking is not None:
-            input_mask = self.input_masking.create_mask(dur_len)
-        else:
-            input_mask = None
-
         dur_indices_pred_parallel, dur_logits_parallel, hidden_state = self._forward_parallel(
-            inputs=inputs, dur_mask=dur_mask, speaking_rate=speaking_rate, input_mask=input_mask
+            inputs=inputs, dur_mask=dur_mask, speaking_rate=speaking_rate,
         )
 
         if self.training:
@@ -717,7 +696,7 @@ class DurationDecoder(NeuralModule):
             if i == 0 and silence_pad_start:
                 dur_indices[:, 0] = silence_pad_start - 1
 
-        dur_indices = dur_indices[:, :max_len]
+        dur_indices = dur_indices[:, :max_len_padded]
 
         if silence_pad_end:
             for i in range(dur_indices.shape[0]):
@@ -725,6 +704,7 @@ class DurationDecoder(NeuralModule):
                 dur_indices[i, last_i] = silence_pad_end - 1
 
         dur_indices = dur_indices * dur_mask
+        dur_indices = dur_indices[:, :max_len]
 
         self.duration_transformer.reset_cache(use_cache=False)
 
@@ -745,12 +725,9 @@ class AudioDecoder(NeuralModule):
         codebook_size,
         codebook_dim,
         semantic_dim,
-        infill_min=0.25,
+        infill_min=0.1,
         infill_max=1.0,
         infill_beta=2.0,
-        input_infill_min=1.0,
-        input_infill_max=1.0,
-        input_infill_beta=1.0,
     ):
         super(AudioDecoder, self).__init__()
         self.num_semantic_codebooks = num_semantic_codebooks
@@ -789,16 +766,6 @@ class AudioDecoder(NeuralModule):
             d_model=d_model, infill_min=infill_min, infill_max=infill_max, infill_beta=infill_beta
         )
 
-        if input_infill_min < 1.0:
-            self.input_masking = FeatureMasking(
-                d_model=d_model,
-                infill_min=input_infill_min,
-                infill_max=input_infill_max,
-                infill_beta=input_infill_beta
-            )
-        else:
-            self.input_masking = None
-
     def _compute_logits(self, inputs, audio_mask, layer_norm, projection, num_codebooks, topk=None, temperature=None):
         audio_mask_3d = rearrange(audio_mask, 'B T -> B T 1')
 
@@ -824,13 +791,10 @@ class AudioDecoder(NeuralModule):
 
         return audio_tokens, audio_logits
 
-    def _forward_parallel(self, inputs, audio_mask, input_mask=None):
+    def _forward_parallel(self, inputs, audio_mask):
         audio_mask_3d = rearrange(audio_mask, 'B T -> B T 1')
         hidden_state = self.input_layer(inputs)
         hidden_state = hidden_state * audio_mask_3d
-
-        if input_mask is not None:
-            hidden_state = self.input_masking(inputs=hidden_state, mask=input_mask)
 
         hidden_state = self.parallel_transformer(x=hidden_state, x_mask=audio_mask)['output']
 
@@ -921,13 +885,8 @@ class AudioDecoder(NeuralModule):
     def forward(self, inputs, audio_len, audio_codes, semantic_codes):
         audio_mask = get_mask_from_lengths(audio_len)
 
-        if self.training and self.input_masking is not None:
-            input_mask = self.input_masking.create_mask(input_len=audio_len)
-        else:
-            input_mask = None
-
         semantic_tokens_parallel, semantic_logits_parallel, hidden_state = self._forward_parallel(
-            inputs=inputs, audio_mask=audio_mask, input_mask=input_mask
+            inputs=inputs, audio_mask=audio_mask,
         )
 
         if self.training:
