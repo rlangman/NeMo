@@ -44,6 +44,9 @@ from nemo.core.neural_types.neural_type import NeuralType
 from nemo.utils import model_utils
 from nemo.utils.decorators import experimental
 
+from collections import defaultdict
+import time
+import numpy as np
 
 @experimental
 class DiscreteSpeechModel(ModelPT):
@@ -52,6 +55,8 @@ class DiscreteSpeechModel(ModelPT):
         # Convert to Hydra 1.0 compatible DictConfig
         cfg = model_utils.convert_model_config_to_dict_config(cfg)
         cfg = model_utils.maybe_update_config_version(cfg)
+
+        self.train_step_times = defaultdict(list)
 
         self.text_tokenizer = self._create_tokenizer(cfg.text_tokenizer)
         self.pad_with_space = self.text_tokenizer.pad_with_space
@@ -544,6 +549,31 @@ class DiscreteSpeechModel(ModelPT):
                         optimizer.zero_grad()
                         logging.warning(f'detected inf or nan values in gradients for {name}! Setting gradients to zero.')
                         return  # Skip the optimizer step
+
+    def on_train_batch_start(self, batch, batch_idx, unused: int = 0):
+        # Synchronize GPU if using CUDA for accurate timing
+        torch.cuda.synchronize()
+        self.start_time = time.perf_counter()
+
+    def on_train_batch_end(self, outputs, batch, batch_idx, unused: int = 0):
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        step_time = time.perf_counter() - self.start_time
+
+        audio_lens = batch["audio_token_lens"] / 25
+
+        dur = audio_lens.max()
+        dur = int(((dur + 1) // 2) * 2)
+        if step_time < 2.0:
+            self.train_step_times[dur].append(step_time)
+
+    def on_validation_epoch_end(self):
+        print("\n")
+        for dur, time_list in sorted(self.train_step_times.items()):
+            if len(time_list) > 0:
+                single_turn_time = round(np.mean(time_list), 2)
+                print(f"{dur}s: {single_turn_time}s")
+        print("\n")
 
     def _setup_train_dataloader(self, dataset_config, dataloader_params):
         dataset = create_text_to_speech_dataset(

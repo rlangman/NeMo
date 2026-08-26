@@ -4,7 +4,7 @@
 
 name: DiscreteSpeech
 
-batch_size: 1000
+batch_size: 500
 
 max_epochs: ???
 
@@ -20,6 +20,8 @@ phoneme_dict_path: ???
 heteronyms_path: ???
 
 log_dir: ???
+
+freeze_aligner: false
 
 codebook_num: 7
 codebook_levels: [4, 4, 4, 4, 4, 4]
@@ -58,8 +60,8 @@ context_emb_dim: 512
 context_hidden_dim: 768
 context_filters: 3072
 
-text_hidden_dim: 1024
-text_filters: 4096
+text_hidden_dim: 768
+text_filters: 3072
 
 duration_hidden_dim: 512
 duration_filters: 2048
@@ -67,12 +69,10 @@ duration_filters: 2048
 audio_hidden_dim: 768
 audio_filters: 3072
 
-text_infill: 1.0
-input_infill: 1.0
+text_infill: 0.7
 
 model:
-  text_down_sample_rate: 2
-  space_dur: 3
+  freeze_aligner: ${freeze_aligner}
 
   context_max_len: ${context_max_len}
   max_token_duration: ${num_duration}
@@ -116,13 +116,13 @@ model:
         feature_readers: ${train_feature_readers}
         batch_duration: ${batch_size}
         pc_dropout_rate: 0.1
-        min_duration: 0.5
+        min_duration: 1.0
         max_duration: 20.1
 
     dataloader_params:
       batch_size: 1
       num_workers: 4
-      persistent_workers: true
+      persistent_workers: false
 
   validation_ds:
     dataset:
@@ -130,7 +130,7 @@ model:
       dataset_args:
         dataset_meta: ${val_ds_meta}
         feature_readers: ${feature_readers}
-        min_duration: 0.5
+        min_duration: 1.0
         max_duration: 20.1
 
     dataloader_params:
@@ -176,8 +176,6 @@ model:
       temperature: 20.0
       n_att_channels: 128
       n_mel_filters: 256
-      condition_dim: ${context_emb_dim}
-      condition_types: ["add"]
 
   context_encoder:
     _target_: nemo.collections.tts.modules.discrete_speech_modules.ContextEncoder
@@ -204,7 +202,7 @@ model:
     infill_min: ${text_infill}
     transformer:
       _target_: nemo.collections.tts.modules.transformer_2501.Transformer
-      n_layers: 6
+      n_layers: 10
       d_model: ${text_hidden_dim}
       d_ffn: ${text_filters}
       sa_n_heads: 8
@@ -224,7 +222,7 @@ model:
     codebook_size: ${codebook_size}
     codebook_dim: ${codebook_dim}
     semantic_dim: ${semantic_codebook_dim}
-    input_infill_min: ${input_infill}
+    infill_min: 0.1
     parallel_transformer:
       _target_: nemo.collections.tts.modules.transformer_2501.Transformer
       n_layers: 8
@@ -267,7 +265,7 @@ model:
     input_dim: ${text_hidden_dim}
     d_model: ${duration_hidden_dim}
     num_duration: ${num_duration}
-    input_infill_min: ${input_infill}
+    infill_min: 0.1
     parallel_transformer:
       _target_: nemo.collections.tts.modules.transformer_2501.Transformer
       n_layers: 8
@@ -306,7 +304,7 @@ model:
 
   optim:
     name: adamw
-    lr: 4e-5
+    lr: 3e-5
 
     sched:
       name: ExponentialLR
