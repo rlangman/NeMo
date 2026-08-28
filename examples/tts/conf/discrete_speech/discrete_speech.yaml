@@ -4,7 +4,7 @@
 
 name: DiscreteSpeech
 
-batch_size: 1000
+batch_size: 600
 
 max_epochs: ???
 
@@ -21,14 +21,15 @@ heteronyms_path: ???
 
 log_dir: ???
 
+freeze_aligner: false
+
 codebook_num: 7
 codebook_levels: [4, 4, 4, 4, 4, 4]
-codebook_dim: 42
+codebook_dim: 6
+codebook_emb_dim: 42
 codebook_size: 4096
 
 acoustic_codebook_num: 6
-semantic_codebook_num: 1
-semantic_codebook_dim: 6
 
 context_max_len: 250
 
@@ -58,8 +59,8 @@ context_emb_dim: 512
 context_hidden_dim: 768
 context_filters: 3072
 
-text_hidden_dim: 1024
-text_filters: 4096
+text_hidden_dim: 768
+text_filters: 3072
 
 duration_hidden_dim: 512
 duration_filters: 2048
@@ -68,17 +69,15 @@ audio_hidden_dim: 768
 audio_filters: 3072
 
 text_infill: 1.0
-input_infill: 1.0
 
 model:
-  text_down_sample_rate: 2
-  space_dur: 3
+  freeze_aligner: ${freeze_aligner}
 
   context_max_len: ${context_max_len}
   max_token_duration: ${num_duration}
 
-  semantic_codebook_num: ${semantic_codebook_num}
-  semantic_codebook_dim: ${semantic_codebook_dim}
+  semantic_codebook_num: 1
+  semantic_codebook_dim: ${codebook_dim}
   acoustic_codebook_num: ${acoustic_codebook_num}
 
   vector_quantizer:
@@ -116,13 +115,13 @@ model:
         feature_readers: ${train_feature_readers}
         batch_duration: ${batch_size}
         pc_dropout_rate: 0.1
-        min_duration: 0.5
+        min_duration: 1.0
         max_duration: 20.1
 
     dataloader_params:
       batch_size: 1
       num_workers: 4
-      persistent_workers: true
+      persistent_workers: false
 
   validation_ds:
     dataset:
@@ -130,7 +129,7 @@ model:
       dataset_args:
         dataset_meta: ${val_ds_meta}
         feature_readers: ${feature_readers}
-        min_duration: 0.5
+        min_duration: 1.0
         max_duration: 20.1
 
     dataloader_params:
@@ -170,18 +169,16 @@ model:
     prior_scaling_factor: 0.1
     alignment_encoder:
       _target_: nemo.collections.tts.modules.aligner.AlignmentEncoder
-      n_mel_channels: ${codebook_dim}
+      n_mel_channels: ${codebook_emb_dim}
       n_text_channels: 256
       dist_type: cosine
       temperature: 20.0
       n_att_channels: 128
       n_mel_filters: 256
-      condition_dim: ${context_emb_dim}
-      condition_types: ["add"]
 
   context_encoder:
     _target_: nemo.collections.tts.modules.discrete_speech_modules.ContextEncoder
-    input_dim: ${codebook_dim}
+    input_dim: ${codebook_emb_dim}
     output_dim: ${context_emb_dim}
     d_model: ${context_hidden_dim}
     transformer:
@@ -204,7 +201,7 @@ model:
     infill_min: ${text_infill}
     transformer:
       _target_: nemo.collections.tts.modules.transformer_2501.Transformer
-      n_layers: 6
+      n_layers: 10
       d_model: ${text_hidden_dim}
       d_ffn: ${text_filters}
       sa_n_heads: 8
@@ -219,12 +216,11 @@ model:
     _target_: nemo.collections.tts.modules.discrete_speech_modules.AudioDecoder
     input_dim: ${text_hidden_dim}
     d_model: ${audio_hidden_dim}
-    num_semantic_codebooks: ${semantic_codebook_num}
-    num_acoustic_codebooks: ${acoustic_codebook_num}
     codebook_size: ${codebook_size}
     codebook_dim: ${codebook_dim}
-    semantic_dim: ${semantic_codebook_dim}
-    input_infill_min: ${input_infill}
+    codebook_emb_dim: ${codebook_emb_dim}
+    input_codebooks_per_step: [1, 3]
+    output_codebooks_per_step: [3, 3]
     parallel_transformer:
       _target_: nemo.collections.tts.modules.transformer_2501.Transformer
       n_layers: 8
@@ -249,25 +245,35 @@ model:
       use_static_pos_emb: false
       has_xattn: false
       is_causal: true
-    acoustic_transformer:
-      _target_: nemo.collections.tts.modules.transformer_2501.Transformer
-      n_layers: 6
-      d_model: ${audio_hidden_dim}
-      d_ffn: ${audio_filters}
-      sa_n_heads: 8
-      kernel_size: 1
-      p_dropout: 0.1
-      ffn_type: "swiglu"
-      use_static_pos_emb: false
-      has_xattn: false
-      is_causal: true
+    acoustic_transformers:
+      - _target_: nemo.collections.tts.modules.transformer_2501.Transformer
+        n_layers: 3
+        d_model: ${audio_hidden_dim}
+        d_ffn: ${audio_filters}
+        sa_n_heads: 8
+        kernel_size: 1
+        p_dropout: 0.1
+        ffn_type: "swiglu"
+        use_static_pos_emb: false
+        has_xattn: false
+        is_causal: true
+      - _target_: nemo.collections.tts.modules.transformer_2501.Transformer
+        n_layers: 3
+        d_model: ${audio_hidden_dim}
+        d_ffn: ${audio_filters}
+        sa_n_heads: 8
+        kernel_size: 1
+        p_dropout: 0.1
+        ffn_type: "swiglu"
+        use_static_pos_emb: false
+        has_xattn: false
+        is_causal: true
 
   duration_decoder:
     _target_: nemo.collections.tts.modules.discrete_speech_modules.DurationDecoder
     input_dim: ${text_hidden_dim}
     d_model: ${duration_hidden_dim}
     num_duration: ${num_duration}
-    input_infill_min: ${input_infill}
     parallel_transformer:
       _target_: nemo.collections.tts.modules.transformer_2501.Transformer
       n_layers: 8
@@ -306,7 +312,7 @@ model:
 
   optim:
     name: adamw
-    lr: 4e-5
+    lr: 3e-5
 
     sched:
       name: ExponentialLR
@@ -323,7 +329,7 @@ trainer:
   gradient_clip_val: 5.0
   enable_checkpointing: false # Provided by exp_manager
   logger: false # Provided by exp_manager
-  log_every_n_steps: 1000
+  log_every_n_steps: 500
   check_val_every_n_epoch: 1
   benchmark: false
   use_distributed_sampler: false

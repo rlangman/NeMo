@@ -279,7 +279,7 @@ class DiscreteSpeechModel(ModelPT):
         semantic_codes = rearrange(semantic_codes, 'B C T -> B T C')
         audio_codes = rearrange(audio_codes, 'B C T -> B T C')
         semantic_tokens_pred_pre, semantic_logits_pre, semantic_tokens_pred, semantic_logits, acoustic_tokens_pred, acoustic_logits = self.decoder(
-            inputs=text_enc_repeated,
+            hidden_state=text_enc_repeated,
             audio_len=audio_len,
             audio_codes=audio_codes,
             semantic_codes=semantic_codes,

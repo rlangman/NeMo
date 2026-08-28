@@ -606,9 +606,9 @@ class DurationBatchedTextToSpeechDataset(IterableDataset):
         dataset,
         steps_per_epoch,
         batch_duration,
-        min_duration=6,
+        min_duration=8,
         max_duration=20,
-        quadratic_duration=20,
+        quadratic_duration=60,
     ):
         super().__init__()
         self.dataset = dataset
