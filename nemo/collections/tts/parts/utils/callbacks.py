@@ -770,6 +770,7 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
         duration_temperature: Optional[float] = None,
         silence_pad_start: Optional[int] = None,
         silence_pad_end: Optional[int] = None,
+        cond_layers: Optional[List[int]] = None,
     ) -> None:
         self.log_audio = log_audio
         self.log_alignment = log_alignment
@@ -782,6 +783,7 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
         self.duration_temperature = duration_temperature
         self.silence_pad_start = silence_pad_start
         self.silence_pad_end = silence_pad_end
+        self.cond_layers = cond_layers
         self.audio_codec = _load_vocoder(
             model_name=audio_codec_name,
             checkpoint_path=audio_codec_path,
@@ -845,6 +847,7 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
                 duration_temperature=self.duration_temperature,
                 silence_pad_start=self.silence_pad_start,
                 silence_pad_end=self.silence_pad_end,
+                cond_layers=self.cond_layers,
             )
 
         if self.log_audio:

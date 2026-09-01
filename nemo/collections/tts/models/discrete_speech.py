@@ -74,7 +74,6 @@ class DiscreteSpeechModel(ModelPT):
 
         # Quantizer definitions
         self.semantic_codebook_num = cfg.get("semantic_codebook_num")
-        self.semantic_codebook_dim = cfg.get("semantic_codebook_dim")
         self.acoustic_codebook_num = cfg.get("acoustic_codebook_num")
         self.vector_quantizer = instantiate(cfg.vector_quantizer)
 
@@ -275,14 +274,11 @@ class DiscreteSpeechModel(ModelPT):
         )
 
         text_enc_repeated, _ = regulate_len(durs, text_enc, pace=1.0)
-        semantic_codes = audio_codes[:, : self.semantic_codebook_dim, :]
-        semantic_codes = rearrange(semantic_codes, 'B C T -> B T C')
         audio_codes = rearrange(audio_codes, 'B C T -> B T C')
         semantic_tokens_pred_pre, semantic_logits_pre, semantic_tokens_pred, semantic_logits, acoustic_tokens_pred, acoustic_logits = self.decoder(
             hidden_state=text_enc_repeated,
             audio_len=audio_len,
             audio_codes=audio_codes,
-            semantic_codes=semantic_codes,
         )
 
         return (
@@ -681,6 +677,7 @@ class DiscreteSpeechModel(ModelPT):
             "silence_pad_start": NeuralType((), IntType(), optional=True),
             "silence_pad_end": NeuralType((), IntType(), optional=True),
             "min_speaking_rate": NeuralType((), IntType(), optional=True),
+            "cond_layers": NeuralType((), IntType(), optional=True),
         },
         output_types={
             "audio_tokens_pred": NeuralType(('B', 'C', 'T_token'), TokenIndex()),
@@ -703,6 +700,7 @@ class DiscreteSpeechModel(ModelPT):
         speaking_rate=None,
         silence_pad_start=None,
         silence_pad_end=None,
+        cond_layers=None,
         min_speaking_rate=-0.5,
         max_speaking_rate=0.5,
         max_infer_length = 750,
@@ -746,6 +744,7 @@ class DiscreteSpeechModel(ModelPT):
             infer_weight=audio_weight,
             topk=audio_topk,
             temperature=audio_temperature,
+            cond_layers=cond_layers,
         )
 
         return audio_tokens, audio_len

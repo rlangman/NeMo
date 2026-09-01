@@ -15,6 +15,7 @@
 from einops import rearrange
 import torch
 
+from nemo.collections.tts.modules.transformer_2501 import Transformer
 from nemo.collections.tts.parts.utils.helpers import binarize_attention_parallel, get_mask_from_lengths, regulate_len
 from nemo.collections.tts.parts.utils.tts_dataset_utils import beta_binomial_prior_distribution_torch
 from nemo.core.classes import NeuralModule, typecheck
@@ -33,27 +34,27 @@ from nemo.core.neural_types.elements import (
 from nemo.core.neural_types.neural_type import NeuralType
 
 
-def create_infill_mask(input_len, dist, infill_min, infill_max):
+def create_feature_mask(input_len, dist, mask_min, mask_max):
     batch_size = input_len.shape[0]
     len_mask = get_mask_from_lengths(input_len)
     max_len = len_mask.shape[1]
 
-    infill_percent = dist.sample(sample_shape=torch.Size([batch_size])).to(input_len.device)
-    infill_percent = infill_min + (infill_max - infill_min) * infill_percent
-    infill_len = infill_percent * input_len.float()
-    infill_rank = torch.clamp_min(infill_len - 1, 0).long()
-    infill_rank = rearrange(infill_rank, 'B -> B 1')
+    mask_percent = dist.sample(sample_shape=torch.Size([batch_size])).to(input_len.device)
+    mask_percent = mask_min + (mask_max - mask_min) * mask_percent
+    mask_len = mask_percent * input_len.float()
+    mask_rank = torch.clamp_min(mask_len - 1, 0).long()
+    mask_rank = rearrange(mask_rank, 'B -> B 1')
 
     # [batch_size, time]
-    infill_vals = torch.rand(size=len_mask.shape, device=input_len.device)
-    infill_vals = infill_vals * len_mask
-    infill_topk = torch.topk(infill_vals, k=max_len, dim=1, sorted=True).values
-    infill_min_val = torch.gather(infill_topk, index=infill_rank, dim=1)
-    infill_mask = infill_vals >= infill_min_val
+    mask_vals = torch.rand(size=len_mask.shape, device=input_len.device)
+    mask_vals = mask_vals * len_mask
+    mask_topk = torch.topk(mask_vals, k=max_len, dim=1, sorted=True).values
+    mask_min_val = torch.gather(mask_topk, index=mask_rank, dim=1)
+    mask = mask_vals >= mask_min_val
 
-    infill_mask = infill_mask * len_mask
+    mask = mask * len_mask
 
-    return infill_mask
+    return mask
 
 
 def sample_tokens(logits, topk, temperature):
@@ -115,23 +116,27 @@ class Conv1d(NeuralModule):
 
 
 class FeatureMasking(NeuralModule):
-    def __init__(self, d_model: int, infill_min: float, infill_max: float, infill_beta: float):
+    def __init__(self, mask_min: float, mask_max: float, mask_alpha: float = 2.0, mask_beta: float = 1.0):
         super().__init__()
-        self.mask_emb = torch.nn.Parameter(torch.zeros([1, 1, d_model]))
-        self.infill_min = infill_min
-        self.infill_max = infill_max
-        self.infill_dist = torch.distributions.beta.Beta(concentration1=1.0, concentration0=infill_beta)
+        self.mask_min = mask_min
+        self.mask_max = mask_max
+        self.mask_dist = torch.distributions.beta.Beta(concentration1=mask_alpha, concentration0=mask_beta)
 
     def forward(self, inputs, mask):
         mask = rearrange(mask, 'B T -> B T 1')
-        out = torch.where(mask, inputs, self.mask_emb)
+        out = torch.where(mask, torch.zeros_like(inputs), inputs)
         return out
 
     def create_mask(self, input_len):
-        mask = create_infill_mask(
-            input_len=input_len, dist=self.infill_dist, infill_min=self.infill_min, infill_max=self.infill_max
+        mask = create_feature_mask(
+            input_len=input_len, dist=self.mask_dist, mask_min=self.mask_min, mask_max=self.mask_max
         )
         return mask
+
+    def apply_dropout(self, inputs, input_len):
+        mask = self.create_mask(input_len=input_len)
+        out = self.forward(inputs=inputs, mask=mask)
+        return out
 
 
 class Aligner(NeuralModule):
@@ -417,9 +422,9 @@ class TextEncoder(NeuralModule):
         eos_id,
         space_id,
         space_dur,
-        infill_min=1.0,
-        infill_max=1.0,
-        infill_beta=2.0,
+        mask_min=0.0,
+        mask_max=0.0,
+        mask_alpha=1.0,
     ):
         super(TextEncoder, self).__init__()
         self.d_model = d_model
@@ -439,12 +444,11 @@ class TextEncoder(NeuralModule):
         else:
             self.downsample_layer = None
 
-        if infill_min < 1.0:
+        if mask_max > 0.0:
             self.text_masking = FeatureMasking(
-                d_model=self.d_model,
-                infill_min=infill_min,
-                infill_max=infill_max,
-                infill_beta=infill_beta
+                mask_min=mask_min,
+                mask_max=mask_max,
+                mask_alpha=mask_alpha
             )
         else:
             self.text_masking = None
@@ -471,8 +475,7 @@ class TextEncoder(NeuralModule):
         text_emb = self.word_emb(text)
 
         if self.training and self.text_masking is not None:
-            text_infill_mask = self.text_masking.create_mask(text_len)
-            text_emb = self.text_masking(inputs=text_emb, mask=text_infill_mask)
+            text_emb = self.text_masking.apply_dropout(inputs=text_emb, input_len=text_len)
 
         out = self.transformer(x=text_emb, x_mask=text_mask)['output']
 
@@ -504,9 +507,8 @@ class DurationDecoder(NeuralModule):
         input_dim,
         d_model,
         num_duration,
-        infill_min=0.1,
-        infill_max=1.0,
-        infill_beta=2.0,
+        mask_min=0.0,
+        mask_max=0.9,
     ):
         super(DurationDecoder, self).__init__()
         self.d_model = d_model
@@ -524,9 +526,7 @@ class DurationDecoder(NeuralModule):
         self.layer_norm_parallel = torch.nn.LayerNorm(self.d_model)
         self.duration_layer_parallel = torch.nn.Linear(self.d_model, self.num_duration)
 
-        self.duration_masking = FeatureMasking(
-            d_model=self.d_model, infill_min=infill_min, infill_max=infill_max, infill_beta=infill_beta
-        )
+        self.duration_masking = FeatureMasking(mask_min=mask_min, mask_max=mask_max)
 
     def _compute_logits(self, inputs, dur_mask, layer_norm, projection, topk=None, temperature=None):
         dur_mask_3d = rearrange(dur_mask, 'B T -> B T 1')
@@ -566,7 +566,8 @@ class DurationDecoder(NeuralModule):
 
         return dur_indices_pred, dur_logits, hidden_state
 
-    def _forward_duration(self, inputs, dur_mask, dur_indices, infill_mask=None, topk=None, temperature=None):
+    def _forward_duration(self, inputs, dur_len, dur_indices, cond_mask=None, topk=None, temperature=None):
+        dur_mask = get_mask_from_lengths(dur_len)
         dur_mask_3d = rearrange(dur_mask, 'B T -> B T 1')
 
         dur_indices_shifted = dur_indices[:, :-1]
@@ -575,7 +576,11 @@ class DurationDecoder(NeuralModule):
         log_dur = torch.log(dur_indices_shifted + 1.0).detach()
         log_dur = rearrange(log_dur, 'B T -> B T 1')
         dur_res = self.duration_cond_layer(log_dur)
-        dur_res = self.duration_masking(inputs=dur_res, mask=infill_mask)
+
+        if cond_mask is not None:
+            dur_res = self.duration_masking(inputs=dur_res, mask=cond_mask)
+        elif self.training:
+            dur_res = self.duration_masking.apply_dropout(inputs=dur_res, input_len=dur_len)
 
         hidden_state = inputs + dur_res
         hidden_state = hidden_state * dur_mask_3d
@@ -619,13 +624,8 @@ class DurationDecoder(NeuralModule):
             inputs=inputs, dur_mask=dur_mask, speaking_rate=speaking_rate,
         )
 
-        if self.training:
-            duration_infill_mask = self.duration_masking.create_mask(dur_len)
-        else:
-            duration_infill_mask = dur_mask
-
         dur_indices_pred, dur_logits = self._forward_duration(
-            inputs=hidden_state, dur_mask=dur_mask, dur_indices=dur_indices, infill_mask=duration_infill_mask
+            inputs=hidden_state, dur_len=dur_len, dur_indices=dur_indices,
         )
 
         return dur_indices_pred, dur_logits, dur_indices_pred_parallel, dur_logits_parallel
@@ -667,20 +667,22 @@ class DurationDecoder(NeuralModule):
         self.duration_transformer.reset_cache(use_cache=True, frames_per_iter=frames_per_iter)
 
         for i in range(0, max_len_padded, frames_per_iter):
-            hidden_state_i = hidden_state_input[:, : i + frames_per_iter, :]
-            dur_indices_i = dur_indices[:, : i + frames_per_iter]
-            dur_mask_i = dur_mask[:, : i + frames_per_iter]
+            len_i = i + frames_per_iter
+            dur_len_i = torch.clamp_max(dur_len_padded, max=len_i)
+            hidden_state_i = hidden_state_input[:, :len_i, :]
+            dur_indices_i = dur_indices[:, :len_i]
+            dur_mask_i = dur_mask[:, : len_i]
 
-            dur_maskin_i = dur_mask_i.clone()
+            dur_cond_mask_i = torch.zeros_like(dur_mask_i)
             for j in range(1, frames_per_iter):
-                dur_maskin_i[:, i + j] = False
+                dur_cond_mask_i[:, i + j] = True
 
             # [B, C, T], [B, C, W, T]
             _, logits_i = self._forward_duration(
                 inputs=hidden_state_i,
-                dur_mask=dur_mask_i,
+                dur_len=dur_len_i,
+                cond_mask=dur_cond_mask_i,
                 dur_indices=dur_indices_i,
-                infill_mask=dur_maskin_i,
             )
             logits_i = rearrange(logits_i, 'B C T -> B T C')
             logits = (parallel_weight * logits_parallel[:, :i + frames_per_iter]) + (ar_weight * logits_i)
@@ -713,27 +715,23 @@ class DurationDecoder(NeuralModule):
 
 class AudioInputLayer(NeuralModule):
 
-    def __init__(self, input_dim, output_dim, audio_mask_min=0.1, audio_mask_max=1.0, audio_mask_beta=2.0):
+    def __init__(self, input_dim, output_dim, audio_mask_min=0.0, audio_mask_max=0.9):
         super(AudioInputLayer, self).__init__()
         self.hidden_layer = torch.nn.Linear(input_dim, output_dim)
         self.output_layer = torch.nn.Linear(output_dim, output_dim)
 
-        self.masking = FeatureMasking(
-            d_model=output_dim, infill_min=audio_mask_min, infill_max=audio_mask_max, infill_beta=audio_mask_beta
-        )
+        self.masking = FeatureMasking(mask_min=audio_mask_min, mask_max=audio_mask_max)
 
-    def forward(self, hidden_state, audio_codes, audio_len, infill_mask=None):
+    def forward(self, hidden_state, audio_codes, audio_len, cond_mask=None):
         audio_mask = get_mask_from_lengths(audio_len)
 
         res = self.hidden_layer(audio_codes)
         res = self.output_layer(res)
 
-        if self.training:
-            infill_mask = self.masking.create_mask(input_len=audio_len)
-        elif infill_mask is None:
-            infill_mask = audio_mask
-
-        res = self.masking(inputs=res, mask=infill_mask)
+        if cond_mask is not None:
+            res = self.masking.forward(inputs=res, mask=cond_mask)
+        elif self.training:
+            res = self.masking.apply_dropout(inputs=res, input_len=audio_len)
 
         out = hidden_state + res
         out = out * rearrange(audio_mask, 'B T -> B T 1')
@@ -777,6 +775,34 @@ class AudioPredictionLayer(NeuralModule):
         return audio_tokens, audio_logits
 
 
+class AcousticLayer(NeuralModule):
+
+    def __init__(
+        self,
+        input_dim,
+        d_model,
+        num_codebook,
+        codebook_size,
+        transformer_kwargs,
+    ):
+        super(AcousticLayer, self).__init__()
+        self.input_layer = AudioInputLayer(input_dim=input_dim, output_dim=d_model)
+        self.transformer = Transformer(**transformer_kwargs)
+        self.predict_layer = AudioPredictionLayer(
+            input_dim=d_model, num_codebooks=num_codebook, codebook_size=codebook_size
+        )
+
+    def forward(self, hidden_state, audio_len, audio_codes, condition_input=False, cond_mask=None):
+        audio_mask = get_mask_from_lengths(audio_len)
+        if condition_input:
+            hidden_state = self.input_layer(
+                hidden_state=hidden_state, audio_codes=audio_codes, audio_len=audio_len, cond_mask=cond_mask
+            )
+        hidden_state = self.transformer(x=hidden_state, x_mask=audio_mask)['output']
+        audio_tokens, audio_logits = self.predict_layer(hidden_state=hidden_state, audio_mask=audio_mask)
+        return hidden_state, audio_tokens, audio_logits
+
+
 
 class AudioDecoder(NeuralModule):
 
@@ -784,29 +810,17 @@ class AudioDecoder(NeuralModule):
         self,
         parallel_transformer,
         semantic_transformer,
-        acoustic_transformers,
+        acoustic_transformer_kwargs,
         input_dim,
         d_model,
+        num_acoustic_codebooks,
         codebook_size,
         codebook_dim,
-        codebook_emb_dim,
-        input_codebooks_per_step,
-        output_codebooks_per_step,
-        infill_min=0.1,
-        infill_max=1.0,
-        infill_beta=2.0,
     ):
         super(AudioDecoder, self).__init__()
-        num_acoustic_codebooks = sum(output_codebooks_per_step)
         self.num_codebooks = num_acoustic_codebooks + 1
-
-        assert input_codebooks_per_step[0] == 1
-        assert (self.num_codebooks * codebook_dim) == codebook_emb_dim
-        assert len(acoustic_transformers) == len(input_codebooks_per_step) == len(output_codebooks_per_step)
-
         self.codebook_dim = codebook_dim
-        self.codebook_emb_dim = codebook_emb_dim
-        self.output_codebooks_per_step = output_codebooks_per_step
+        self.codebook_emb_dim = codebook_dim * self.num_codebooks
 
         self.input_layer = torch.nn.Linear(input_dim, d_model)
         self.parallel_transformer = parallel_transformer
@@ -814,30 +828,22 @@ class AudioDecoder(NeuralModule):
             input_dim=d_model, num_codebooks=1, codebook_size=codebook_size
         )
 
-        self.audio_input_layer = AudioInputLayer(input_dim=codebook_emb_dim, output_dim=d_model)
+        self.audio_input_layer = AudioInputLayer(input_dim=self.codebook_emb_dim, output_dim=d_model)
         self.semantic_transformer = semantic_transformer
         self.semantic_predict_layer = AudioPredictionLayer(
             input_dim=d_model, num_codebooks=1, codebook_size=codebook_size
         )
 
-        self.codebook_indices = []
-        self.acoustic_transformers = torch.nn.ModuleList(acoustic_transformers)
-        self.input_layers = torch.nn.ModuleList()
-        self.predict_layers = torch.nn.ModuleList()
-        start_i = 0
-        for num_codebook_input, num_codebook_output in zip(input_codebooks_per_step, output_codebooks_per_step):
-            input_dim = codebook_dim * num_codebook_input
-            input_layer = AudioInputLayer(input_dim=input_dim, output_dim=d_model)
-            self.input_layers.append(input_layer)
-
-            predict_layer = AudioPredictionLayer(
-                input_dim=d_model, num_codebooks=num_codebook_output, codebook_size=codebook_size
+        self.acoustic_layers = torch.nn.ModuleList()
+        for _ in range(num_acoustic_codebooks):
+            acoustic_layer = AcousticLayer(
+                input_dim=codebook_dim,
+                d_model=d_model,
+                num_codebook=1,
+                codebook_size=codebook_size,
+                transformer_kwargs=acoustic_transformer_kwargs,
             )
-            self.predict_layers.append(predict_layer)
-
-            end_i = start_i + input_dim
-            self.codebook_indices.append((start_i, end_i))
-            start_i = end_i
+            self.acoustic_layers.append(acoustic_layer)
 
     def _forward_parallel(self, hidden_state, audio_len):
         audio_mask = get_mask_from_lengths(audio_len)
@@ -852,16 +858,15 @@ class AudioDecoder(NeuralModule):
 
         return semantic_tokens_parallel, semantic_logits_parallel, hidden_state
 
-    def _forward_semantic(self, hidden_state, audio_len, audio_codes, topk=None, temperature=None, infill_mask=None):
+    def _forward_semantic(self, hidden_state, audio_len, audio_codes, topk=None, temperature=None, cond_mask=None):
         audio_mask = get_mask_from_lengths(audio_len)
-        audio_mask_3d = rearrange(audio_mask, 'B T -> B T 1')
 
         audio_codes_shifted = audio_codes[:, :-1, :]
         audio_codes_shifted = torch.nn.functional.pad(audio_codes_shifted, pad=(0, 0, 1, 0))
 
         # [batch_size, audio_len, hidden_dim]
         hidden_state = self.audio_input_layer(
-            hidden_state=hidden_state, audio_codes=audio_codes_shifted, audio_len=audio_len, infill_mask=infill_mask,
+            hidden_state=hidden_state, audio_codes=audio_codes_shifted, audio_len=audio_len, cond_mask=cond_mask,
         )
         hidden_state = self.semantic_transformer(x=hidden_state, x_mask=audio_mask)['output']
         semantic_tokens, semantic_logits = self.semantic_predict_layer(
@@ -870,29 +875,16 @@ class AudioDecoder(NeuralModule):
 
         return semantic_tokens, semantic_logits, hidden_state
 
-    def _forward_acoustic(self, hidden_state, audio_len, audio_codes, infill_mask=None):
-        audio_mask = get_mask_from_lengths(audio_len)
-        audio_mask_3d = rearrange(audio_mask, 'B T -> B T 1')
-
+    def _forward_acoustic(self, hidden_state, audio_len, audio_codes):
         audio_token_list = []
         audio_logit_list = []
-        for (start_i, end_i), num_codebook_output, input_layer, transformer, predict_layer in zip(
-            self.codebook_indices,
-            self.output_codebooks_per_step,
-            self.input_layers,
-            self.acoustic_transformers,
-            self.predict_layers,
-        ):
+        for i, acoustic_layer in enumerate(self.acoustic_layers):
+            start_i = i * self.codebook_dim
+            end_i = (i + 1) * self.codebook_dim
             audio_codes_i = audio_codes[:, :, start_i:end_i]
-
-            hidden_state = input_layer(
-                hidden_state=hidden_state, audio_codes=audio_codes_i, audio_len=audio_len, infill_mask=infill_mask,
+            hidden_state, audio_tokens, audio_logits = acoustic_layer(
+                hidden_state=hidden_state, audio_codes=audio_codes_i, audio_len=audio_len, condition_input=True
             )
-            hidden_state = transformer(x=hidden_state, x_mask=audio_mask)['output']
-            audio_tokens, audio_logits = predict_layer(
-                hidden_state=hidden_state, audio_mask=audio_mask, topk=None, temperature=None
-            )
-
             audio_token_list.append(audio_tokens)
             audio_logit_list.append(audio_logits)
 
@@ -901,23 +893,19 @@ class AudioDecoder(NeuralModule):
 
         return audio_tokens, audio_logits
 
-    def _infer_acoustic(self, hidden_state, audio_len, semantic_codes, vector_quantizer, infill_mask=None):
-        audio_mask = get_mask_from_lengths(audio_len)
-
+    def _infer_acoustic(
+        self, hidden_state, audio_len, semantic_codes, vector_quantizer, cond_layers, cond_mask=None
+    ):
         audio_token_list = []
         input_codes = semantic_codes
-        for num_codebook_output, input_layer, transformer, predict_layer in zip(
-            self.output_codebooks_per_step,
-            self.input_layers,
-            self.acoustic_transformers,
-            self.predict_layers
-        ):
-            hidden_state = input_layer(
-                hidden_state=hidden_state, audio_codes=input_codes, audio_len=audio_len, infill_mask=infill_mask,
-            )
-            hidden_state = transformer(x=hidden_state, x_mask=audio_mask)['output']
-            audio_tokens_i, _ = predict_layer(
-                hidden_state=hidden_state, audio_mask=audio_mask, topk=None, temperature=None
+        for i, acoustic_layer in enumerate(self.acoustic_layers):
+            cond_input = i in cond_layers
+            hidden_state, audio_tokens_i, _ = acoustic_layer(
+                hidden_state=hidden_state,
+                audio_codes=input_codes,
+                audio_len=audio_len,
+                condition_input=cond_input,
+                cond_mask=cond_mask
             )
             audio_token_list.append(audio_tokens_i)
 
@@ -936,7 +924,6 @@ class AudioDecoder(NeuralModule):
             "hidden_state": NeuralType(('B', 'T_audio', 'D'), EncodedRepresentation()),
             "audio_len": NeuralType(tuple('B'), LengthsType()),
             "audio_codes": NeuralType(('B', 'T_audio', 'C'), EncodedRepresentation()),
-            "semantic_codes": NeuralType(('B', 'T_audio', 'C'), EncodedRepresentation()),
         }
 
     @property
@@ -951,7 +938,7 @@ class AudioDecoder(NeuralModule):
         }
 
     @typecheck()
-    def forward(self, hidden_state, audio_len, audio_codes, semantic_codes):
+    def forward(self, hidden_state, audio_len, audio_codes):
         semantic_tokens_parallel, semantic_logits_parallel, hidden_state = self._forward_parallel(
             hidden_state=hidden_state, audio_len=audio_len,
         )
@@ -974,7 +961,11 @@ class AudioDecoder(NeuralModule):
         infer_weight=1.0,
         topk=None,
         temperature=None,
+        cond_layers=None
     ):
+        if cond_layers is None:
+            cond_layers = set(range(len(self.acoustic_layers)))
+
         ar_weight = infer_weight / (1.0 + infer_weight)
         parallel_weight = 1.0 / (1.0 + infer_weight)
         batch_size = inputs.shape[0]
@@ -1000,8 +991,8 @@ class AudioDecoder(NeuralModule):
         logits_parallel = rearrange(logits_parallel, 'B C W T -> B T C W')
 
         self.semantic_transformer.reset_cache(use_cache=True, frames_per_iter=frames_per_iter)
-        for transformer in self.acoustic_transformers:
-            transformer.reset_cache(use_cache=True, frames_per_iter=frames_per_iter)
+        for acoustic_layer in self.acoustic_layers:
+            acoustic_layer.transformer.reset_cache(use_cache=True, frames_per_iter=frames_per_iter)
 
         for i in range(0, max_len_padded, frames_per_iter):
             len_i = i + frames_per_iter
@@ -1010,15 +1001,15 @@ class AudioDecoder(NeuralModule):
             audio_mask_i = audio_mask[:, : len_i]
             hidden_state_i = hidden_state_input[:, : len_i, :]
 
-            audio_maskin_i = audio_mask_i.clone()
+            audio_cond_mask_i = torch.zeros_like(audio_mask_i)
             for j in range(1, frames_per_iter):
-                audio_maskin_i[:, i + j] = False
+                audio_cond_mask_i[:, i + j] = True
 
             _, logits_i, hidden_state_i = self._forward_semantic(
                 hidden_state=hidden_state_i,
                 audio_len=audio_len_i,
                 audio_codes=audio_codes_i,
-                infill_mask=audio_maskin_i,
+                cond_mask=audio_cond_mask_i,
             )
             logits_i = rearrange(logits_i, 'B C W T -> B T C W')
             logits = (parallel_weight * logits_parallel[:, :len_i]) + (ar_weight * logits_i)
@@ -1043,7 +1034,8 @@ class AudioDecoder(NeuralModule):
                 audio_len=audio_len_i,
                 semantic_codes=semantic_codes_i,
                 vector_quantizer=vector_quantizer,
-                infill_mask=audio_maskin_i,
+                cond_layers=cond_layers,
+                cond_mask=audio_cond_mask_i,
             )
             acoustic_tokens_i = rearrange(acoustic_tokens_i, 'B C T -> B T C')
             acoustic_tokens_rearrange_i = rearrange(acoustic_tokens_i, 'B T C -> C B T')
@@ -1063,7 +1055,7 @@ class AudioDecoder(NeuralModule):
         audio_tokens = rearrange(audio_tokens, 'B T C -> B C T')
 
         self.semantic_transformer.reset_cache(use_cache=False)
-        for transformer in self.acoustic_transformers:
-            transformer.reset_cache(use_cache=False)
+        for acoustic_layer in self.acoustic_layers:
+            acoustic_layer.transformer.reset_cache(use_cache=False)
 
         return audio_tokens
