@@ -126,7 +126,7 @@ model:
       dataset_args:
         dataset_meta: ${val_ds_meta}
         feature_readers: ${feature_readers}
-        min_duration: 1.0
+        min_duration: 3.0
         max_duration: 20.1
 
     dataloader_params:
@@ -145,8 +145,14 @@ model:
       - _target_: nemo.collections.tts.parts.utils.callbacks.DiscreteSpeechArtifactGenerator
         audio_codec_path: ${audio_codec_path}
         log_audio: true
-        audio_weight: 3.0
+        audio_weight: 4.0
+        audio_topk: 40
+        audio_temperature: 0.5
+        acoustic_topk: 20
+        acoustic_temperature: 0.4
         duration_weight: 1.0
+        duration_topk: 3
+        duration_temperature: 0.7
         silence_pad_start: 1
         silence_pad_end: 2
 
@@ -294,7 +300,7 @@ model:
 
   optim:
     name: adamw
-    lr: 3e-5
+    lr: 4e-5
 
     sched:
       name: ExponentialLR
