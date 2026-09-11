@@ -764,10 +764,12 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
         frames_per_iter: int = 1,
         audio_weight: float = 1.0,
         audio_topk: Optional[int] = None,
-        audio_temperature: Optional[float] = None,
+        audio_temperature: Optional[float] = 1.0,
+        acoustic_topk: Optional[int] = None,
+        acoustic_temperature: Optional[float] = 1.0,
         duration_weight: float = 1.0,
         duration_topk: Optional[int] = None,
-        duration_temperature: Optional[float] = None,
+        duration_temperature: Optional[float] = 1.0,
         silence_pad_start: Optional[int] = None,
         silence_pad_end: Optional[int] = None,
         cond_layers: Optional[List[int]] = None,
@@ -778,6 +780,8 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
         self.audio_weight = audio_weight
         self.audio_topk = audio_topk
         self.audio_temperature = audio_temperature
+        self.acoustic_topk = acoustic_topk
+        self.acoustic_temperature = acoustic_temperature
         self.duration_weight = duration_weight
         self.duration_topk = duration_topk
         self.duration_temperature = duration_temperature
@@ -842,6 +846,8 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
                 audio_weight=self.audio_weight,
                 audio_topk=self.audio_topk,
                 audio_temperature=self.audio_temperature,
+                acoustic_topk=self.acoustic_topk,
+                acoustic_temperature=self.acoustic_temperature,
                 duration_weight=self.duration_weight,
                 duration_topk=self.duration_topk,
                 duration_temperature=self.duration_temperature,

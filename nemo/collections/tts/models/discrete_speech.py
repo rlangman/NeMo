@@ -130,7 +130,7 @@ class DiscreteSpeechModel(ModelPT):
         self.semantic_token_loss_fn = AudioTokenLoss(num_codebooks=self.semantic_codebook_num)
         self.acoustic_token_loss_fn = AudioTokenLoss(num_codebooks=self.acoustic_codebook_num)
 
-        self.duration_loss_scale = cfg.get("duration_loss_scale", 0.01)
+        self.duration_loss_scale = cfg.get("duration_loss_scale", 1e-3)
         self.duration_loss_fn = MaskedSoftmax()
 
         self.speaking_rate_loss_scale = cfg.get("speaking_rate_loss_scale", 1e-4)
@@ -670,6 +670,8 @@ class DiscreteSpeechModel(ModelPT):
             "audio_weight": NeuralType((), FloatType(), optional=True),
             "audio_topk": NeuralType((), IntType(), optional=True),
             "audio_temperature": NeuralType((), FloatType(), optional=True),
+            "acoustic_topk": NeuralType((), IntType(), optional=True),
+            "acoustic_temperature": NeuralType((), FloatType(), optional=True),
             "duration_weight": NeuralType((), FloatType(), optional=True),
             "duration_topk": NeuralType((), IntType(), optional=True),
             "duration_temperature": NeuralType((), FloatType(), optional=True),
@@ -693,10 +695,12 @@ class DiscreteSpeechModel(ModelPT):
         frames_per_iter=1,
         audio_weight=1.0,
         audio_topk=None,
-        audio_temperature=None,
+        audio_temperature=1.0,
+        acoustic_topk=None,
+        acoustic_temperature=1.0,
         duration_weight=1.0,
         duration_topk=None,
-        duration_temperature=None,
+        duration_temperature=1.0,
         speaking_rate=None,
         silence_pad_start=None,
         silence_pad_end=None,
@@ -745,6 +749,8 @@ class DiscreteSpeechModel(ModelPT):
             topk=audio_topk,
             temperature=audio_temperature,
             cond_layers=cond_layers,
+            acoustic_topk=acoustic_topk,
+            acoustic_temperature=acoustic_temperature,
         )
 
         return audio_tokens, audio_len

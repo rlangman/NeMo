@@ -749,7 +749,7 @@ class AudioPredictionLayer(NeuralModule):
         self.layer_norm = torch.nn.LayerNorm(input_dim)
         self.output_layer =torch.nn.Linear(input_dim, num_logits)
 
-    def forward(self, hidden_state, audio_mask, topk=None, temperature=None):
+    def forward(self, hidden_state, audio_mask, topk=None, temperature=1.0):
         audio_mask_3d = rearrange(audio_mask, 'B T -> B T 1')
 
         # [batch_size, audio_len, num_codebook * codebook_size]
@@ -792,14 +792,18 @@ class AcousticLayer(NeuralModule):
             input_dim=d_model, num_codebooks=num_codebook, codebook_size=codebook_size
         )
 
-    def forward(self, hidden_state, audio_len, audio_codes, condition_input=False, cond_mask=None):
+    def forward(
+        self, hidden_state, audio_len, audio_codes, condition_input=False, cond_mask=None, topk=None, temperature=1.0
+    ):
         audio_mask = get_mask_from_lengths(audio_len)
         if condition_input:
             hidden_state = self.input_layer(
                 hidden_state=hidden_state, audio_codes=audio_codes, audio_len=audio_len, cond_mask=cond_mask
             )
         hidden_state = self.transformer(x=hidden_state, x_mask=audio_mask)['output']
-        audio_tokens, audio_logits = self.predict_layer(hidden_state=hidden_state, audio_mask=audio_mask)
+        audio_tokens, audio_logits = self.predict_layer(
+            hidden_state=hidden_state, audio_mask=audio_mask, topk=topk, temperature=temperature
+        )
         return hidden_state, audio_tokens, audio_logits
 
 
@@ -894,7 +898,15 @@ class AudioDecoder(NeuralModule):
         return audio_tokens, audio_logits
 
     def _infer_acoustic(
-        self, hidden_state, audio_len, semantic_codes, vector_quantizer, cond_layers, cond_mask=None
+        self,
+        hidden_state,
+        audio_len,
+        semantic_codes,
+        vector_quantizer,
+        cond_layers,
+        cond_mask=None,
+        topk=None,
+        temperature=1.0,
     ):
         audio_token_list = []
         input_codes = semantic_codes
@@ -905,7 +917,9 @@ class AudioDecoder(NeuralModule):
                 audio_codes=input_codes,
                 audio_len=audio_len,
                 condition_input=cond_input,
-                cond_mask=cond_mask
+                cond_mask=cond_mask,
+                topk=topk,
+                temperature=temperature,
             )
             audio_token_list.append(audio_tokens_i)
 
@@ -961,7 +975,9 @@ class AudioDecoder(NeuralModule):
         infer_weight=1.0,
         topk=None,
         temperature=None,
-        cond_layers=None
+        cond_layers=None,
+        acoustic_topk=None,
+        acoustic_temperature=None,
     ):
         if cond_layers is None:
             cond_layers = set(range(len(self.acoustic_layers)))
@@ -1036,6 +1052,8 @@ class AudioDecoder(NeuralModule):
                 vector_quantizer=vector_quantizer,
                 cond_layers=cond_layers,
                 cond_mask=audio_cond_mask_i,
+                topk=acoustic_topk,
+                temperature=acoustic_temperature,
             )
             acoustic_tokens_i = rearrange(acoustic_tokens_i, 'B C T -> B T C')
             acoustic_tokens_rearrange_i = rearrange(acoustic_tokens_i, 'B T C -> C B T')
