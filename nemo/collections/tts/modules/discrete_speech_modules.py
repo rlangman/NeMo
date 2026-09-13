@@ -784,9 +784,13 @@ class AcousticLayer(NeuralModule):
         num_codebook,
         codebook_size,
         transformer_kwargs,
+        mask_min=0.0,
+        mask_max=0.9,
     ):
         super(AcousticLayer, self).__init__()
-        self.input_layer = AudioInputLayer(input_dim=input_dim, output_dim=d_model)
+        self.input_layer = AudioInputLayer(
+            input_dim=input_dim, output_dim=d_model, audio_mask_min=mask_min, audio_mask_max=mask_max
+        )
         self.transformer = Transformer(**transformer_kwargs)
         self.predict_layer = AudioPredictionLayer(
             input_dim=d_model, num_codebooks=num_codebook, codebook_size=codebook_size
@@ -820,6 +824,8 @@ class AudioDecoder(NeuralModule):
         num_acoustic_codebooks,
         codebook_size,
         codebook_dim,
+        mask_min=0.0,
+        mask_max=0.9,
     ):
         super(AudioDecoder, self).__init__()
         self.num_codebooks = num_acoustic_codebooks + 1
@@ -832,7 +838,12 @@ class AudioDecoder(NeuralModule):
             input_dim=d_model, num_codebooks=1, codebook_size=codebook_size
         )
 
-        self.audio_input_layer = AudioInputLayer(input_dim=self.codebook_emb_dim, output_dim=d_model)
+        self.audio_input_layer = AudioInputLayer(
+            input_dim=self.codebook_emb_dim,
+            output_dim=d_model,
+            audio_mask_min=mask_min,
+            audio_mask_max=mask_max,
+        )
         self.semantic_transformer = semantic_transformer
         self.semantic_predict_layer = AudioPredictionLayer(
             input_dim=d_model, num_codebooks=1, codebook_size=codebook_size
@@ -846,6 +857,8 @@ class AudioDecoder(NeuralModule):
                 num_codebook=1,
                 codebook_size=codebook_size,
                 transformer_kwargs=acoustic_transformer_kwargs,
+                mask_min=mask_min,
+                mask_max=mask_max,
             )
             self.acoustic_layers.append(acoustic_layer)
 
