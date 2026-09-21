@@ -12,8 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from collections import defaultdict
 from pathlib import Path
 import logging
+import numpy as np
 import random
 from typing import List
 
@@ -551,7 +553,23 @@ class DiscreteSpeechModel(ModelPT):
             "val_speaking_rate_loss": speaking_rate_loss,
             "val_speaking_rate_accuracy": speaking_rate_accuracy,
         }
+
+        dataset_loss_map = defaultdict(list)
+        dataset_names = batch_dict.get("dataset_names")
+        for i, dataset_name in enumerate(dataset_names):
+            semantic_token_loss_pre = self.semantic_token_loss_fn(
+                logits=semantic_logits_pre[i:i+1], target_tokens=semantic_tokens[i:i+1], mask=audio_mask[i:i+1]
+            )
+            semantic_token_loss_pre = semantic_token_loss_pre.cpu().item()
+            dataset_loss_map[dataset_name].append(semantic_token_loss_pre)
+
+        for dataset_name, loss_list in dataset_loss_map.items():
+            metric_name = f"val_semantic_token_loss_pre_{dataset_name}"
+            metric_loss = np.mean(loss_list)
+            metrics[metric_name] = metric_loss
+
         self.log_dict(metrics, on_epoch=True, sync_dist=True)
+
 
     def on_before_optimizer_step(self, optimizer):
         for name, param in self.named_parameters():
