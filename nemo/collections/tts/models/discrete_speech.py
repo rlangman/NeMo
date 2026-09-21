@@ -14,6 +14,7 @@
 
 from pathlib import Path
 import logging
+import random
 from typing import List
 
 import torch
@@ -27,7 +28,7 @@ from nemo.collections.tts.data.text_to_speech_dataset import create_text_to_spee
 from nemo.collections.tts.losses.aligner_loss import BinLoss, ForwardSumLoss
 from nemo.collections.tts.losses.discrete_speech_loss import AudioTokenLoss, MaskedSoftmax, SpeakingRateLoss
 from nemo.collections.tts.parts.utils.callbacks import LoggingCallback
-from nemo.collections.tts.parts.utils.helpers import get_mask_from_lengths, regulate_len
+from nemo.collections.tts.parts.utils.helpers import get_mask_from_lengths, regulate_len, stack_tensors
 from nemo.core import ModelPT
 from nemo.core.classes.common import PretrainedModelInfo, typecheck
 from nemo.core.neural_types.elements import (
@@ -69,6 +70,7 @@ class DiscreteSpeechModel(ModelPT):
         # Maximum duration of a single multiphone
         self.max_token_duration = cfg.get("max_token_duration")
 
+        self.context_min_len = cfg.get("context_min_len", 75)
         # Context length in terms of number of audio tokens
         self.context_max_len = cfg.get("context_max_len", 250)
 
@@ -177,8 +179,23 @@ class DiscreteSpeechModel(ModelPT):
         return token_tensor
 
     def get_context(self, audio_tokens, audio_len):
-        context_tokens = audio_tokens[:, :, :self.context_max_len]
-        context_len = torch.clamp_max(input=audio_len, max=self.context_max_len)
+        if self.training:
+            context_token_list = []
+            context_len_list = []
+            for i in range(audio_tokens.shape[0]):
+                rand_len = random.randint(self.context_min_len, self.context_max_len)
+                context_len_i = min(rand_len, audio_len[i])
+                max_start = audio_len[i] - context_len_i
+                start_i = random.randint(0, max_start)
+
+                context_token_list.append(audio_tokens[i, :, start_i : start_i + context_len_i])
+                context_len_list.append(context_len_i)
+            context_len = torch.tensor(context_len_list, device=audio_tokens.device)
+            max_len = int(context_len.max().item())
+            context_tokens = stack_tensors(context_token_list, max_lens=[max_len])
+        else:
+            context_tokens = audio_tokens[:, :, :self.context_max_len]
+            context_len = torch.clamp_max(input=audio_len, max=self.context_max_len)
 
         context_tokens_rearrange = rearrange(context_tokens, 'B C T -> C B T')
         # [batch_size, code_dim, audio_token_len]
