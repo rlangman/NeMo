@@ -25,10 +25,12 @@ from nemo.core.neural_types.neural_type import NeuralType
 
 
 class MaskedSoftmax(Loss):
-    def __init__(self):
+    def __init__(self, label_smoothing=0.0):
         super(MaskedSoftmax, self).__init__()
         self.ignore_index = -1
-        self.loss_fn = torch.nn.CrossEntropyLoss(ignore_index=self.ignore_index, reduction='mean')
+        self.loss_fn = torch.nn.CrossEntropyLoss(
+            ignore_index=self.ignore_index, reduction='mean', label_smoothing=label_smoothing
+        )
 
     @property
     def input_types(self):
@@ -54,10 +56,10 @@ class MaskedSoftmax(Loss):
 
 
 class AudioTokenLoss(Loss):
-    def __init__(self, num_codebooks):
+    def __init__(self, num_codebooks, label_smoothing=0.0):
         super(AudioTokenLoss, self).__init__()
         self.num_codebooks = num_codebooks
-        self.loss_fn = MaskedSoftmax()
+        self.loss_fn = MaskedSoftmax(label_smoothing=label_smoothing)
 
     @property
     def input_types(self):
@@ -91,9 +93,9 @@ class AudioTokenLoss(Loss):
 
 
 class SpeakingRateLoss(Loss):
-    def __init__(self):
+    def __init__(self, label_smoothing=0.0):
         super(SpeakingRateLoss, self).__init__()
-        self.loss_fn = torch.nn.CrossEntropyLoss(reduction='mean')
+        self.loss_fn = torch.nn.CrossEntropyLoss(reduction='mean', label_smoothing=label_smoothing)
 
     @property
     def input_types(self):

@@ -129,14 +129,21 @@ class DiscreteSpeechModel(ModelPT):
 
         # Reconstruction losses
         self.audio_token_loss_scale = cfg.get("audio_token_loss_scale", 1.0)
-        self.semantic_token_loss_fn = AudioTokenLoss(num_codebooks=self.semantic_codebook_num)
-        self.acoustic_token_loss_fn = AudioTokenLoss(num_codebooks=self.acoustic_codebook_num)
+        audio_label_smoothing = cfg.get("audio_label_smoothing", 0.0)
+        self.semantic_token_loss_fn = AudioTokenLoss(
+            num_codebooks=self.semantic_codebook_num, label_smoothing=audio_label_smoothing
+        )
+        self.acoustic_token_loss_fn = AudioTokenLoss(
+            num_codebooks=self.acoustic_codebook_num, label_smoothing=audio_label_smoothing
+        )
 
         self.duration_loss_scale = cfg.get("duration_loss_scale", 1e-3)
-        self.duration_loss_fn = MaskedSoftmax()
+        duration_label_smoothing = cfg.get("duration_label_smoothing", 0.0)
+        self.duration_loss_fn = MaskedSoftmax(label_smoothing=duration_label_smoothing)
 
         self.speaking_rate_loss_scale = cfg.get("speaking_rate_loss_scale", 1e-4)
-        self.speaking_rate_loss_fn = SpeakingRateLoss()
+        speaking_rate_label_smoothing = cfg.get("speaking_rate_label_smoothing", 0.0)
+        self.speaking_rate_loss_fn = SpeakingRateLoss(label_smoothing=speaking_rate_label_smoothing)
 
         # Aligner losses
         self.aligner_bin_loss_scale = cfg.get("aligner_bin_loss_scale", 0.01)
