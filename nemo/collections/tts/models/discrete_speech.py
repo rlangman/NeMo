@@ -64,8 +64,12 @@ class DiscreteSpeechModel(ModelPT):
         num_text_embed = len(self.text_tokenizer.tokens)
         self.text_pad_token = self.text_tokenizer.pad
         self.space_token = self.text_tokenizer.space
-        self.bos_token = self.text_tokenizer.bos
-        self.eos_token = self.text_tokenizer.eos
+        if self.text_tokenizer.add_boundaries:
+            self.bos_token = self.text_tokenizer.bos
+            self.eos_token = self.text_tokenizer.eos
+        else:
+            self.bos_token = None
+            self.eos_token = None
 
         # Maximum duration of a single multiphone
         self.max_token_duration = cfg.get("max_token_duration")
