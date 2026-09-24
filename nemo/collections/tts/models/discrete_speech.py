@@ -112,7 +112,7 @@ class DiscreteSpeechModel(ModelPT):
             self.aligner = instantiate(cfg.aligner, num_text_emb=num_text_embed)
         elif self.text_down_sample_rate > 1:
             self.aligner = instantiate(
-                cfg.aligner,
+                alignment_encoder=cfg.aligner,
                 num_text_emb=num_text_embed,
                 down_sample_rate=self.text_down_sample_rate,
                 bos_id=self.bos_token,
@@ -262,22 +262,24 @@ class DiscreteSpeechModel(ModelPT):
         context_tokens,
         context_len,
     ):
+        # Get context information
         context_tokens_rearrange = rearrange(context_tokens, 'B C T -> C B T')
         # [batch_size, code_dim, context_token_len]
         context_codes = self.vector_quantizer.decode(indices=context_tokens_rearrange, input_len=audio_len).detach()
-        context_emb = self.get_context(audio_tokens=context_tokens, audio_len=context_len)
         context_durs, context_dur_len, _, _, _ = self.aligner(
             text=context_text,
             text_len=context_text_len,
             audio_codes=context_codes,
             audio_len=context_len,
-            #context_emb=context_emb,
         )
-        _, speaking_rate_indices = self.get_speaking_rate(text_len=context_text_len, durs=context_durs, dur_len=context_dur_len)
+        context_durs = context_durs.detach()
+        context_dur_len = context_dur_len.detach()
+        _, speaking_rate_indices = self.get_speaking_rate(
+            text_len=context_text_len, durs=context_durs, dur_len=context_dur_len
+        )
         speaking_rate_indices = speaking_rate_indices.detach()
 
-        speaking_rate_indices_pred, speaking_rate_logits = self.speaking_rate_predictor(context_emb=context_emb)
-
+        # Get duration information
         audio_tokens_rearrange = rearrange(audio_tokens, 'B C T -> C B T')
         # [batch_size, code_dim, audio_token_len]
         audio_codes = self.vector_quantizer.decode(indices=audio_tokens_rearrange, input_len=audio_len).detach()
@@ -287,10 +289,15 @@ class DiscreteSpeechModel(ModelPT):
             text_len=text_len,
             audio_codes=audio_codes,
             audio_len=audio_len,
-            #context_emb=context_emb,
         )
+        durs = durs.detach()
+        dur_len = dur_len.detach()
         speaking_rate, _ = self.get_speaking_rate(text_len=text_len, durs=durs, dur_len=dur_len)
         speaking_rate = speaking_rate.detach()
+
+        # Extract context, predict speaking rate
+        context_emb = self.get_context(audio_tokens=context_tokens, audio_len=context_len)
+        speaking_rate_indices_pred, speaking_rate_logits = self.speaking_rate_predictor(context_emb=context_emb)
 
         # [batch_size, text_len, hidden_dim]
         text_enc, dur_len, _ = self.text_encoder(text=text, text_len=text_len, context_emb=context_emb)
@@ -430,11 +437,12 @@ class DiscreteSpeechModel(ModelPT):
             + train_dur_loss
             + train_dur_loss_pre
             + train_speaking_rate_loss
+            + train_ctc_loss
+            + train_bin_loss
         )
 
         if not self.freeze_aligner:
             loss += train_ctc_loss + train_bin_loss
-
 
         metrics = {
             "t_semantic_token_loss": semantic_token_loss,
@@ -692,13 +700,19 @@ class DiscreteSpeechModel(ModelPT):
         dur_mask = get_mask_from_lengths(dur_len)
         max_dur_len = dur_mask.shape[1]
         indices = torch.arange(max_dur_len, device=durs.device) + 1
+        indices = rearrange(indices, 'T -> 1 T')
+        dur_len = rearrange(dur_len, 'B -> B 1')
         dur_mask = torch.where(
-            rearrange(indices, 'T -> 1 T') == rearrange(dur_len, 'B -> B 1'), torch.zeros_like(dur_mask), dur_mask
+            torch.logical_or(indices == dur_len, indices == (dur_len - 1)),
+            torch.zeros_like(dur_mask),
+            dur_mask
         )
         sr_durs = torch.clamp(durs.float(), min=1, max=self.max_token_duration)
         sr_durs = sr_durs * dur_mask
-        sr_durs = sr_durs[:, 1:]
+        sr_durs = sr_durs[:, 2:]
         sr_audio_len = sr_durs.sum(dim=1)
+        # Add 1 for first/last chars
+        sr_audio_len = sr_audio_len + 2
 
         fps = (-1.0) * sr_audio_len / sr_text_len.float()
         speaking_rate, speaking_rate_indices = self.speaking_rate_quantizer(inputs=fps)

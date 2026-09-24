@@ -889,7 +889,8 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
             attn = rearrange(attn, "B 1 T_spec T_text -> B T_text T_spec")
             attn_hard = rearrange(attn_hard, "B 1 T_spec T_text -> B T_text T_spec")
             for i, (dataset_name, audio_id) in enumerate(zip(dataset_names, audio_ids)):
-                attn_path = Path(f"{dataset_name}/{audio_id}_align.png")
+                #attn_path = Path(f"{dataset_name}/{audio_id}_align.png")
+                attn_path = Path(f"{dataset_name}/{audio_id}"[:85] + "_align.png")
                 attn_i = attn[i, : text_len[i], : audio_len[i]].cpu().numpy()
                 alignment_artifact = ImageArtifact(
                     id=f"align_{audio_id}",
@@ -900,7 +901,8 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
                 )
                 image_artifacts.append(alignment_artifact)
 
-                attn_hard_path = Path(f"{dataset_name}/{audio_id}_align_hard.png")
+                #attn_hard_path = Path(f"{dataset_name}/{audio_id}_align_hard.png")
+                attn_hard_path = Path(f"{dataset_name}/{audio_id}"[:85] + "_align_hard.png")
                 attn_hard_i = attn_hard[i, : text_len[i], : audio_len[i]].cpu().numpy()
                 alignment_hard_artifact = ImageArtifact(
                     id=f"align_hard_{audio_id}",

@@ -21,7 +21,7 @@ heteronyms_path: ???
 
 log_dir: ???
 
-freeze_aligner: ???
+freeze_aligner: false
 
 codebook_num: 7
 codebook_levels: [4, 4, 4, 4, 4, 4]
@@ -31,6 +31,7 @@ codebook_size: 4096
 
 acoustic_codebook_num: 6
 
+context_min_len: 75
 context_max_len: 250
 
 num_duration: 20
@@ -55,6 +56,7 @@ train_feature_readers:
     feature_len_field: "context_token_lens"
 
 context_emb_dim: 512
+aligner_context_emb_dim: 256
 
 context_hidden_dim: 768
 context_filters: 3072
@@ -86,9 +88,9 @@ model:
     _target_: nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers.IPATokenizer
     punct: true
     apostrophe: true
-    pad_with_space: false
+    pad_with_space: true
     skip_oov: false
-    add_boundaries: true
+    add_boundaries: false
     non_default_punct_list: [
       ',', '.', '!', '?', '-',
       ':', ';', '/', '"', '(',
@@ -145,6 +147,7 @@ model:
       - _target_: nemo.collections.tts.parts.utils.callbacks.DiscreteSpeechArtifactGenerator
         audio_codec_path: ${audio_codec_path}
         log_audio: true
+        log_alignment: true
         audio_weight: 4.0
         audio_topk: 40
         audio_temperature: 0.5
@@ -169,15 +172,11 @@ model:
   aligner:
     _target_: nemo.collections.tts.modules.discrete_speech_modules.Aligner
     text_emb_dim: 256
-    prior_scaling_factor: 0.1
     alignment_encoder:
-      _target_: nemo.collections.tts.modules.aligner.AlignmentEncoder
-      n_mel_channels: ${codebook_emb_dim}
-      n_text_channels: 256
-      dist_type: cosine
-      temperature: 20.0
-      n_att_channels: 128
-      n_mel_filters: 256
+      _target_: nemo.collections.tts.modules.aligner_ds.AlignmentEncoderV2
+      audio_dim: ${codebook_emb_dim}
+      text_dim: 256
+      num_channels: 128
 
   context_encoder:
     _target_: nemo.collections.tts.modules.discrete_speech_modules.ContextEncoder
@@ -304,7 +303,7 @@ model:
 
     sched:
       name: ExponentialLR
-      gamma: 0.99
+      gamma: 0.995
 
 trainer:
   num_nodes: 1

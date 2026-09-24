@@ -146,7 +146,7 @@ class Aligner(NeuralModule):
         alignment_encoder,
         num_text_emb,
         text_emb_dim,
-        prior_scaling_factor=0.2,
+        prior_scaling_factor=0.05,
         down_sample_rate=None,
         space_id=None,
         bos_id=None,
@@ -192,7 +192,6 @@ class Aligner(NeuralModule):
             "text_len": NeuralType(tuple('B'), LengthsType()),
             "audio_codes": NeuralType(('B', 'D', 'T_audio'), EncodedRepresentation()),
             "audio_len": NeuralType(tuple('B'), LengthsType()),
-            "context_emb": NeuralType(('B', 'D'), EncodedRepresentation(), optional=True),
         },
         output_types={
             "durations": NeuralType(('B', 'T_text'), TokenDurationType()),
@@ -202,7 +201,7 @@ class Aligner(NeuralModule):
             "attn_logprob": NeuralType(('B', 'S', 'T_audio', 'T_text'), LogprobsType()),
         },
     )
-    def forward(self, text, text_len, audio_codes, audio_len, context_emb=None):
+    def forward(self, text, text_len, audio_codes, audio_len):
         audio_mask = get_mask_from_lengths(audio_len)
         text_mask = get_mask_from_lengths(text_len)
         # [batch_size, text_len, hidden_dim]
@@ -218,9 +217,6 @@ class Aligner(NeuralModule):
         # Aligner requires an inverted mask
         aligner_text_mask = ~rearrange(text_mask, "B T -> B T 1")
 
-        if context_emb is not None:
-            context_emb = rearrange(context_emb, 'B D -> B 1 D')
-
         text_max_len = text_emb.shape[2]
         audio_max_len = audio_codes.shape[2]
         attn_prior = self._create_alignment_prior(
@@ -231,7 +227,7 @@ class Aligner(NeuralModule):
         )
         # [batch_size, 1, audio_len, text_len]
         attn_soft, attn_logprob = self.alignment_encoder(
-            queries=audio_codes, keys=text_emb, mask=aligner_text_mask, attn_prior=attn_prior, conditioning=context_emb
+            queries=audio_codes, keys=text_emb, audio_len=audio_len, text_len=text_len, mask=aligner_text_mask, attn_prior=attn_prior,
         )
         attn_soft = attn_soft * attn_mask
         attn_logprob = attn_logprob * attn_mask
@@ -508,7 +504,7 @@ class DurationDecoder(NeuralModule):
         d_model,
         num_duration,
         mask_min=0.0,
-        mask_max=0.9,
+        mask_max=0.7,
     ):
         super(DurationDecoder, self).__init__()
         self.d_model = d_model
@@ -715,7 +711,7 @@ class DurationDecoder(NeuralModule):
 
 class AudioInputLayer(NeuralModule):
 
-    def __init__(self, input_dim, output_dim, audio_mask_min=0.0, audio_mask_max=0.9):
+    def __init__(self, input_dim, output_dim, audio_mask_min=0.0, audio_mask_max=0.7):
         super(AudioInputLayer, self).__init__()
         self.hidden_layer = torch.nn.Linear(input_dim, output_dim)
         self.output_layer = torch.nn.Linear(output_dim, output_dim)
@@ -785,7 +781,7 @@ class AcousticLayer(NeuralModule):
         codebook_size,
         transformer_kwargs,
         mask_min=0.0,
-        mask_max=0.9,
+        mask_max=0.7,
     ):
         super(AcousticLayer, self).__init__()
         self.input_layer = AudioInputLayer(
@@ -825,7 +821,7 @@ class AudioDecoder(NeuralModule):
         codebook_size,
         codebook_dim,
         mask_min=0.0,
-        mask_max=0.9,
+        mask_max=0.7,
     ):
         super(AudioDecoder, self).__init__()
         self.num_codebooks = num_acoustic_codebooks + 1
