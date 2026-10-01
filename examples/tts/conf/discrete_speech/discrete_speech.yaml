@@ -4,7 +4,7 @@
 
 name: DiscreteSpeech
 
-batch_size: 600
+batch_size: 500
 
 max_epochs: ???
 
@@ -44,6 +44,8 @@ feature_readers:
   audio_codec:
     _target_: nemo.collections.tts.parts.preprocessing.features.AudioCodecFeatureReader
     feature_filename: ${feature_name}
+    sample_rate: 22050
+    hop_length: 882
 
 train_feature_readers:
   audio_codec:
@@ -71,6 +73,11 @@ audio_hidden_dim: 768
 audio_filters: 3072
 
 model:
+  inference_phoneme_probability: 0.0
+  audio_label_smoothing: 0.1
+  duration_label_smoothing: 0.1
+  speaking_rate_label_smoothing: 0.1
+
   freeze_aligner: ${freeze_aligner}
 
   context_max_len: ${context_max_len}
@@ -102,7 +109,7 @@ model:
       _target_: nemo.collections.tts.g2p.models.i18n_ipa.IpaG2p
       phoneme_dict: ${phoneme_dict_path}
       heteronyms: ${heteronyms_path}
-      phoneme_probability: 0.9
+      phoneme_probability: 0.1
       use_chars: true
       use_stresses: false
 
@@ -121,6 +128,7 @@ model:
       batch_size: 1
       num_workers: 4
       persistent_workers: false
+      drop_last: true
 
   validation_ds:
     dataset:
@@ -134,6 +142,7 @@ model:
     dataloader_params:
       batch_size: 8
       num_workers: 1
+      drop_last: true
 
   log_config:
     log_dir: ${log_dir}
@@ -147,17 +156,17 @@ model:
       - _target_: nemo.collections.tts.parts.utils.callbacks.DiscreteSpeechArtifactGenerator
         audio_codec_path: ${audio_codec_path}
         log_audio: true
-        log_alignment: true
+        log_alignment: false
         audio_weight: 4.0
-        audio_topk: 40
+        audio_topk: 20
         audio_temperature: 0.5
         acoustic_topk: 20
-        acoustic_temperature: 0.4
+        acoustic_temperature: 0.5
         duration_weight: 1.0
-        duration_topk: 3
-        duration_temperature: 0.7
-        silence_pad_start: 1
-        silence_pad_end: 2
+        duration_topk: 2
+        duration_temperature: 0.5
+        silence_pad_start: 2
+        silence_pad_end: 3
 
     dataset:
       dataset_type: default
@@ -299,11 +308,11 @@ model:
 
   optim:
     name: adamw
-    lr: 4e-5
+    lr: 3e-5
 
     sched:
       name: ExponentialLR
-      gamma: 0.995
+      gamma: 0.993
 
 trainer:
   num_nodes: 1

@@ -238,10 +238,14 @@ class EmbeddingSimilarityExtractorSharded(pl.LightningModule):
             logger.debug(f"Expected speaker counts for model: {self.speaker_expected_counts}")
 
     def forward(self, batch):
+        batch_audio = batch['audios']
+        batch_audio = batch_audio[:, :160000]
+        batch_audio_len = batch['audio_lengths']
+        batch_audio_len = torch.clamp_max(batch_audio_len, max=160000)
         with torch.no_grad():
             _, speaker_embeddings = self.sv_model.forward(
-                input_signal=batch['audios'],
-                input_signal_length=batch['audio_lengths'],
+                input_signal=batch_audio,
+                input_signal_length=batch_audio_len,
             )
             return speaker_embeddings
 
