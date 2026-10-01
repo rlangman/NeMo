@@ -44,6 +44,8 @@ feature_readers:
   audio_codec:
     _target_: nemo.collections.tts.parts.preprocessing.features.AudioCodecFeatureReader
     feature_filename: ${feature_name}
+    sample_rate: 22050
+    hop_length: 882
 
 train_feature_readers:
   audio_codec:
@@ -71,6 +73,10 @@ audio_hidden_dim: 768
 audio_filters: 3072
 
 model:
+  audio_label_smoothing: 0.1
+  duration_label_smoothing: 0.1
+  speaking_rate_label_smoothing: 0.1
+
   freeze_aligner: ${freeze_aligner}
 
   context_max_len: ${context_max_len}
@@ -147,17 +153,17 @@ model:
       - _target_: nemo.collections.tts.parts.utils.callbacks.DiscreteSpeechArtifactGenerator
         audio_codec_path: ${audio_codec_path}
         log_audio: true
-        log_alignment: true
+        log_alignment: false
         audio_weight: 4.0
         audio_topk: 40
         audio_temperature: 0.5
         acoustic_topk: 20
-        acoustic_temperature: 0.4
+        acoustic_temperature: 0.5
         duration_weight: 1.0
-        duration_topk: 3
-        duration_temperature: 0.7
-        silence_pad_start: 1
-        silence_pad_end: 2
+        duration_topk: 2
+        duration_temperature: 0.5
+        silence_pad_start: 2
+        silence_pad_end: 3
 
     dataset:
       dataset_type: default
@@ -299,7 +305,7 @@ model:
 
   optim:
     name: adamw
-    lr: 4e-5
+    lr: 3e-5
 
     sched:
       name: ExponentialLR

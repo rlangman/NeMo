@@ -121,12 +121,14 @@ def _process_entry(
         audio=audio, sample_rate=sample_rate, audio_id=str(audio_path)
     )
     output_duration = librosa.get_duration(y=audio_trimmed, sr=sample_rate)
-    output_offset = entry["offset"] + librosa.samples_to_time(samples=start_i, sr=sample_rate)
+    #output_offset = entry["offset"] + librosa.samples_to_time(samples=start_i, sr=sample_rate)
+    output_offset = librosa.samples_to_time(samples=start_i, sr=sample_rate)
+
+    original_duration = entry["duration"]
 
     entry["duration"] = round(output_duration, 2)
     entry["offset"] = round(output_offset, 2)
 
-    original_duration = entry["duration"]
     return entry, original_duration, output_duration
 
 
