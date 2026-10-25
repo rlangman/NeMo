@@ -4,7 +4,7 @@
 
 name: DiscreteSpeech
 
-batch_size: 500
+batch_size: 750
 
 max_epochs: ???
 
@@ -95,9 +95,9 @@ model:
     _target_: nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers.IPATokenizer
     punct: true
     apostrophe: true
-    pad_with_space: true
+    pad_with_space: false
     skip_oov: false
-    add_boundaries: false
+    add_boundaries: true
     non_default_punct_list: [
       ',', '.', '!', '?', '-',
       ':', ';', '/', '"', '(',
@@ -121,8 +121,9 @@ model:
         feature_readers: ${train_feature_readers}
         batch_duration: ${batch_size}
         pc_dropout_rate: 0.1
-        min_duration: 1.0
+        min_duration: 2.0
         max_duration: 20.1
+        min_words: 2
 
     dataloader_params:
       batch_size: 1
@@ -138,6 +139,7 @@ model:
         feature_readers: ${feature_readers}
         min_duration: 3.0
         max_duration: 20.1
+        min_words: 2
 
     dataloader_params:
       batch_size: 8
