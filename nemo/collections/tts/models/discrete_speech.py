@@ -58,7 +58,7 @@ class DiscreteSpeechModel(ModelPT):
 
         self.text_tokenizer = self._create_tokenizer(cfg.text_tokenizer)
         self.pad_with_space = self.text_tokenizer.pad_with_space
-        self.inference_phoneme_probability = cfg.get("inference_phoneme_probability", 1.0)
+        self.inference_phoneme_probability = cfg.get("inference_phoneme_probability", 0.0)
 
         super().__init__(cfg=cfg, trainer=trainer)
 
