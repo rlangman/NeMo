@@ -726,6 +726,8 @@ class DiscreteSpeechModel(ModelPT):
         input_types={
             "text": NeuralType(('B', 'T_text'), TokenIndex()),
             "text_len": NeuralType(tuple('B'), LengthsType()),
+            "context_text": NeuralType(('B', 'T_context'), TokenIndex()),
+            "context_text_len": NeuralType(tuple('B'), LengthsType()),
             "context_tokens": NeuralType(('B', 'C', 'T_audio'), TokenIndex()),
             "context_len": NeuralType(tuple('B'), LengthsType()),
             "frames_per_iter": NeuralType((), IntType(), optional=True),
@@ -752,6 +754,8 @@ class DiscreteSpeechModel(ModelPT):
         self,
         text,
         text_len,
+        context_text,
+        context_text_len,
         context_tokens,
         context_len,
         frames_per_iter=1,
@@ -771,6 +775,11 @@ class DiscreteSpeechModel(ModelPT):
         max_speaking_rate=0.5,
         max_infer_length=750,
     ):
+        """Generate target audio using aligned context text/audio as a duration prefix.
+
+        ``context_text`` and ``context_text_len`` describe the transcript of
+        ``context_tokens``. The reference prefix is excluded from the output.
+        """
         context_emb = self.get_context(audio_tokens=context_tokens, audio_len=context_len)
 
         if speaking_rate is None:
@@ -778,12 +787,34 @@ class DiscreteSpeechModel(ModelPT):
             speaking_rate = self.speaking_rate_quantizer.get_codes(indices=speaking_rate_indices)
             speaking_rate = torch.clamp(speaking_rate, min=min_speaking_rate, max=max_speaking_rate)
 
-        # [batch_size, text_len, hidden_dim]
-        text_enc, dur_len, text_durs = self.text_encoder(text=text, text_len=text_len)
-        # [batch_size, text_len]
+        # Align the reference audio to obtain the autoregressive duration prefix.
+        context_codes = self.vector_quantizer.decode(
+            indices=rearrange(context_tokens, 'B C T -> C B T'), input_len=context_len
+        )
+        context_durs, context_dur_len, _, _, _ = self.aligner(
+            text=context_text,
+            text_len=context_text_len,
+            audio_codes=context_codes,
+            audio_len=context_len,
+        )
+        context_dur_indices = self.duration_to_index(durs=context_durs, lengths=context_dur_len)
+
+        # Pack each context and target together without padding between them.
+        combined_text = torch.nn.utils.rnn.pad_sequence(
+            [
+                torch.cat([context_text[i, : context_text_len[i]], text[i, : text_len[i]]])
+                for i in range(text.shape[0])
+            ],
+            batch_first=True,
+            padding_value=self.text_pad_token,
+        )
+        combined_text_len = context_text_len + text_len
+        text_enc, dur_len, _ = self.text_encoder(text=combined_text, text_len=combined_text_len)
 
         dur_indices = self.duration_decoder.infer(
             inputs=text_enc,
+            context_dur_indices=context_dur_indices,
+            context_dur_len=context_dur_len,
             dur_len=dur_len,
             speaking_rate=speaking_rate,
             context_emb=context_emb,
@@ -794,7 +825,17 @@ class DiscreteSpeechModel(ModelPT):
             topk=duration_topk,
             temperature=duration_temperature,
         )
-        dur_mask = get_mask_from_lengths(dur_len)
+        # Remove the reference prefix before generating target audio.
+        target_len = dur_len - context_dur_len
+        text_enc = torch.nn.utils.rnn.pad_sequence(
+            [text_enc[i, context_dur_len[i] : dur_len[i]] for i in range(text.shape[0])],
+            batch_first=True,
+        )
+        dur_indices = torch.nn.utils.rnn.pad_sequence(
+            [dur_indices[i, context_dur_len[i] : dur_len[i]] for i in range(text.shape[0])],
+            batch_first=True,
+        )
+        dur_mask = get_mask_from_lengths(target_len)
         durs = self.index_to_duration(dur_indices=dur_indices, mask=dur_mask)
 
         text_enc_repeated, audio_len = regulate_len(durs, text_enc, pace=1.0)

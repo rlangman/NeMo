@@ -643,7 +643,13 @@ class DurationDecoder(NeuralModule):
         temperature=None,
         silence_pad_start=None,
         silence_pad_end=None,
+        context_dur_indices=None,
+        context_dur_len=None,
     ):
+        """Generate durations, teacher-forcing an optional aligned context prefix."""
+        if (context_dur_indices is None) != (context_dur_len is None):
+            raise ValueError("context_dur_indices and context_dur_len must be provided together")
+
         ar_weight = infer_weight / (1.0 + infer_weight)
         parallel_weight = 1.0 / (1.0 + infer_weight)
         batch_size = inputs.shape[0]
@@ -658,6 +664,15 @@ class DurationDecoder(NeuralModule):
         # [B, T]
         dur_indices_shape = [batch_size, max_len_padded]
         dur_indices = torch.zeros(dur_indices_shape, dtype=torch.int, device=inputs.device)
+
+        if context_dur_len is None:
+            context_dur_len = torch.zeros_like(dur_len)
+        else:
+            prefix_mask = torch.arange(max_len_padded, device=inputs.device)[None, :] < context_dur_len[:, None]
+            prefix_indices = torch.nn.functional.pad(
+                context_dur_indices, (0, max_len_padded - context_dur_indices.shape[1])
+            )
+            dur_indices = torch.where(prefix_mask, prefix_indices, dur_indices)
 
         _, logits_parallel, hidden_state_input = self._forward_parallel(
             inputs=inputs,
@@ -678,7 +693,7 @@ class DurationDecoder(NeuralModule):
 
             dur_cond_mask_i = torch.zeros_like(dur_mask_i)
             for j in range(1, frames_per_iter):
-                dur_cond_mask_i[:, i + j] = True
+                dur_cond_mask_i[:, i + j] = i + j - 1 >= context_dur_len
 
             # [B, C, T], [B, C, W, T]
             _, logits_i = self._forward_duration(
@@ -696,17 +711,21 @@ class DurationDecoder(NeuralModule):
                 dur_indices_i = sample_tokens(logits=logits, topk=topk, temperature=temperature)
 
             for j in range(frames_per_iter):
-                dur_indices[:, i + j] = dur_indices_i[:, i + j]
-
-            if i == 0 and silence_pad_start:
-                dur_indices[:, 0] = silence_pad_start - 1
+                position = i + j
+                dur_indices[:, position] = torch.where(
+                    position < context_dur_len, dur_indices[:, position], dur_indices_i[:, position]
+                )
+                if silence_pad_start:
+                    is_target_start = (position == context_dur_len) & (position < dur_len)
+                    dur_indices[is_target_start, position] = silence_pad_start - 1
 
         dur_indices = dur_indices[:, :max_len_padded]
 
         if silence_pad_end:
             for i in range(dur_indices.shape[0]):
                 last_i = dur_len[i] - 1
-                dur_indices[i, last_i] = silence_pad_end - 1
+                if last_i >= context_dur_len[i]:
+                    dur_indices[i, last_i] = silence_pad_end - 1
 
         dur_indices = dur_indices * dur_mask
         dur_indices = dur_indices[:, :max_len]

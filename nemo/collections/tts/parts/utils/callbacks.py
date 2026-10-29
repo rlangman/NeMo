@@ -840,6 +840,8 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
             audio_tokens_pred, audio_token_lens = model.infer(
                 text=text,
                 text_len=text_len,
+                context_text=text,
+                context_text_len=text_len,
                 context_tokens=audio_tokens,
                 context_len=audio_len,
                 frames_per_iter=self.frames_per_iter,
@@ -872,10 +874,9 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
                 )
                 audio_artifacts.append(audio_artifact)
 
-
         if self.log_alignment:
             with torch.no_grad():
-                _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, attn_hard, attn, _  = model(
+                _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, attn_hard, attn, _ = model(
                     text=text,
                     text_len=text_len,
                     audio_tokens=audio_tokens,
@@ -889,7 +890,7 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
             attn = rearrange(attn, "B 1 T_spec T_text -> B T_text T_spec")
             attn_hard = rearrange(attn_hard, "B 1 T_spec T_text -> B T_text T_spec")
             for i, (dataset_name, audio_id) in enumerate(zip(dataset_names, audio_ids)):
-                #attn_path = Path(f"{dataset_name}/{audio_id}_align.png")
+                # attn_path = Path(f"{dataset_name}/{audio_id}_align.png")
                 attn_path = Path(f"{dataset_name}/{audio_id}"[:85] + "_align.png")
                 attn_i = attn[i, : text_len[i], : audio_len[i]].cpu().numpy()
                 alignment_artifact = ImageArtifact(
@@ -901,7 +902,7 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
                 )
                 image_artifacts.append(alignment_artifact)
 
-                #attn_hard_path = Path(f"{dataset_name}/{audio_id}_align_hard.png")
+                # attn_hard_path = Path(f"{dataset_name}/{audio_id}_align_hard.png")
                 attn_hard_path = Path(f"{dataset_name}/{audio_id}"[:85] + "_align_hard.png")
                 attn_hard_i = attn_hard[i, : text_len[i], : audio_len[i]].cpu().numpy()
                 alignment_hard_artifact = ImageArtifact(
@@ -914,7 +915,6 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
                 image_artifacts.append(alignment_hard_artifact)
 
         return audio_artifacts, image_artifacts
-
 
     def generate_artifacts(
         self, model: LightningModule, batch_dict: Dict, initial_log: bool = False
