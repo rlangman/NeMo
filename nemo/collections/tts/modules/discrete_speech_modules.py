@@ -944,11 +944,23 @@ class AudioDecoder(NeuralModule):
         cond_mask=None,
         topk=None,
         temperature=1.0,
+        context_codes=None,
+        context_len=None,
     ):
         audio_token_list = []
         input_codes = semantic_codes
+        if context_codes is not None:
+            prefix_mask = (
+                torch.arange(context_codes.shape[1], device=context_codes.device)[None, :] < context_len[:, None]
+            )
         for i, acoustic_layer in enumerate(self.acoustic_layers):
             cond_input = i in cond_layers
+            if context_codes is not None:
+                input_codes = torch.where(
+                    prefix_mask.unsqueeze(2),
+                    context_codes[:, :, i * self.codebook_dim : (i + 1) * self.codebook_dim],
+                    input_codes,
+                )
             hidden_state, audio_tokens_i, _ = acoustic_layer(
                 hidden_state=hidden_state,
                 audio_codes=input_codes,
@@ -1026,7 +1038,21 @@ class AudioDecoder(NeuralModule):
         cond_layers=None,
         acoustic_topk=None,
         acoustic_temperature=None,
+        context_tokens=None,
+        context_codes=None,
+        context_len=None,
     ):
+        """Generate audio tokens while preserving an optional reference audio prefix.
+
+        ``inputs`` includes the duration-expanded context text before the target.
+        Reference tokens have shape [B, C, T], codes [B, T, D], and lengths [B].
+        The returned tokens include the reference prefix.
+        """
+        has_prefix = context_len is not None
+        if any(value is not None for value in (context_tokens, context_codes, context_len)) and not all(
+            value is not None for value in (context_tokens, context_codes, context_len)
+        ):
+            raise ValueError("context_tokens, context_codes and context_len must be provided together")
         if cond_layers is None:
             cond_layers = set(range(len(self.acoustic_layers)))
 
@@ -1051,6 +1077,20 @@ class AudioDecoder(NeuralModule):
         semantic_code_shape = [batch_size, max_len_padded, self.codebook_dim]
         semantic_codes = torch.zeros(semantic_code_shape, dtype=torch.float, device=inputs.device)
 
+        if has_prefix:
+            prefix_mask = torch.arange(max_len_padded, device=inputs.device)[None, :] < context_len[:, None]
+            prefix_codes = torch.nn.functional.pad(context_codes, (0, 0, 0, max_len_padded - context_codes.shape[1]))
+            prefix_tokens = torch.nn.functional.pad(
+                rearrange(context_tokens, 'B C T -> B T C'),
+                (0, 0, 0, max_len_padded - context_tokens.shape[2]),
+            )
+            audio_codes = torch.where(prefix_mask.unsqueeze(2), prefix_codes, audio_codes)
+            audio_tokens = torch.where(prefix_mask.unsqueeze(2), prefix_tokens.to(audio_tokens.dtype), audio_tokens)
+            semantic_codes = audio_codes[:, :, : self.codebook_dim].clone()
+        else:
+            context_len = torch.zeros_like(audio_len)
+            prefix_mask = torch.zeros_like(audio_mask)
+
         _, logits_parallel, hidden_state_input = self._forward_parallel(
             hidden_state=inputs, audio_len=audio_len_padded
         )
@@ -1069,7 +1109,7 @@ class AudioDecoder(NeuralModule):
 
             audio_cond_mask_i = torch.zeros_like(audio_mask_i)
             for j in range(1, frames_per_iter):
-                audio_cond_mask_i[:, i + j] = True
+                audio_cond_mask_i[:, i + j] = i + j - 1 >= context_len
 
             _, logits_i, hidden_state_i = self._forward_semantic(
                 hidden_state=hidden_state_i,
@@ -1091,7 +1131,12 @@ class AudioDecoder(NeuralModule):
             semantic_codes_pred_i = rearrange(semantic_codes_pred_i, 'B D T -> B T D')
 
             for j in range(frames_per_iter):
-                semantic_codes[:, i + j, :] = semantic_codes_pred_i[:, i + j, :]
+                position = i + j
+                semantic_codes[:, position, :] = torch.where(
+                    prefix_mask[:, position, None],
+                    semantic_codes[:, position, :],
+                    semantic_codes_pred_i[:, position, :],
+                )
 
             semantic_codes_i = semantic_codes[:, :len_i, :]
 
@@ -1099,6 +1144,8 @@ class AudioDecoder(NeuralModule):
                 hidden_state=hidden_state_i,
                 audio_len=audio_len_i,
                 semantic_codes=semantic_codes_i,
+                context_codes=audio_codes_i if has_prefix else None,
+                context_len=context_len,
                 vector_quantizer=vector_quantizer,
                 cond_layers=cond_layers,
                 cond_mask=audio_cond_mask_i,
@@ -1114,8 +1161,13 @@ class AudioDecoder(NeuralModule):
             for j in range(frames_per_iter):
                 audio_codes_pred_i = torch.concat([semantic_codes_pred_i, acoustic_codes_pred_i], dim=2)
                 audio_tokens_i = torch.concat([semantic_tokens_i, acoustic_tokens_i], dim=2)
-                audio_codes[:, i + j, :] = audio_codes_pred_i[:, i + j, :]
-                audio_tokens[:, i + j, :] = audio_tokens_i[:, i + j, :]
+                position = i + j
+                audio_codes[:, position, :] = torch.where(
+                    prefix_mask[:, position, None], audio_codes[:, position, :], audio_codes_pred_i[:, position, :]
+                )
+                audio_tokens[:, position, :] = torch.where(
+                    prefix_mask[:, position, None], audio_tokens[:, position, :], audio_tokens_i[:, position, :]
+                )
 
         audio_tokens = audio_tokens[:, :max_len, :]
         audio_mask_unpadded = get_mask_from_lengths(audio_len)

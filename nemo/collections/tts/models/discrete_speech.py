@@ -775,7 +775,7 @@ class DiscreteSpeechModel(ModelPT):
         max_speaking_rate=0.5,
         max_infer_length=750,
     ):
-        """Generate target audio using aligned context text/audio as a duration prefix.
+        """Generate target audio using aligned context text/audio as autoregressive prefixes.
 
         ``context_text`` and ``context_text_len`` describe the transcript of
         ``context_tokens``. The reference prefix is excluded from the output.
@@ -799,16 +799,19 @@ class DiscreteSpeechModel(ModelPT):
         )
         context_dur_indices = self.duration_to_index(durs=context_durs, lengths=context_dur_len)
 
-        # Pack each context and target together without padding between them.
+        # Keep the aligned context's trailing space and omit a duplicate
+        # leading space from the target when joining the two sequences.
+        context_last = context_text.gather(1, (context_text_len - 1).unsqueeze(1)).squeeze(1)
+        text_start = ((context_last == self.space_token) & (text[:, 0] == self.space_token)).long()
         combined_text = torch.nn.utils.rnn.pad_sequence(
             [
-                torch.cat([context_text[i, : context_text_len[i]], text[i, : text_len[i]]])
+                torch.cat([context_text[i, : context_text_len[i]], text[i, text_start[i] : text_len[i]]])
                 for i in range(text.shape[0])
             ],
             batch_first=True,
             padding_value=self.text_pad_token,
         )
-        combined_text_len = context_text_len + text_len
+        combined_text_len = context_text_len + text_len - text_start
         text_enc, dur_len, _ = self.text_encoder(text=combined_text, text_len=combined_text_len)
 
         dur_indices = self.duration_decoder.infer(
@@ -825,27 +828,25 @@ class DiscreteSpeechModel(ModelPT):
             topk=duration_topk,
             temperature=duration_temperature,
         )
-        # Remove the reference prefix before generating target audio.
-        target_len = dur_len - context_dur_len
-        text_enc = torch.nn.utils.rnn.pad_sequence(
-            [text_enc[i, context_dur_len[i] : dur_len[i]] for i in range(text.shape[0])],
-            batch_first=True,
-        )
-        dur_indices = torch.nn.utils.rnn.pad_sequence(
-            [dur_indices[i, context_dur_len[i] : dur_len[i]] for i in range(text.shape[0])],
-            batch_first=True,
-        )
-        dur_mask = get_mask_from_lengths(target_len)
+        dur_mask = get_mask_from_lengths(dur_len)
         durs = self.index_to_duration(dur_indices=dur_indices, mask=dur_mask)
+        # Use the original aligned durations so the text prefix matches the
+        # reference audio exactly, including zero or clipped token durations.
+        for i in range(text.shape[0]):
+            durs[i, : context_dur_len[i]] = context_durs[i, : context_dur_len[i]].to(durs.dtype)
 
         text_enc_repeated, audio_len = regulate_len(durs, text_enc, pace=1.0)
 
-        audio_len = torch.clamp_max(audio_len, max=max_infer_length)
-        text_enc_repeated = text_enc_repeated[:, :max_infer_length, :]
+        # Limit generated audio without truncating the reference prefix.
+        audio_len = context_len + torch.clamp_max(audio_len - context_len, max=max_infer_length)
+        text_enc_repeated = text_enc_repeated[:, : audio_len.max(), :]
 
         # [B, C_semantic, T]
         audio_tokens = self.decoder.infer(
             inputs=text_enc_repeated,
+            context_tokens=context_tokens,
+            context_codes=rearrange(context_codes, 'B D T -> B T D'),
+            context_len=context_len,
             audio_len=audio_len,
             frames_per_iter=frames_per_iter,
             vector_quantizer=self.vector_quantizer,
@@ -857,4 +858,9 @@ class DiscreteSpeechModel(ModelPT):
             acoustic_temperature=acoustic_temperature,
         )
 
-        return audio_tokens, audio_len
+        # Return only the generated target audio, excluding the reference.
+        audio_tokens = torch.nn.utils.rnn.pad_sequence(
+            [audio_tokens[i, :, context_len[i] : audio_len[i]].transpose(0, 1) for i in range(text.shape[0])],
+            batch_first=True,
+        ).transpose(1, 2)
+        return audio_tokens, audio_len - context_len

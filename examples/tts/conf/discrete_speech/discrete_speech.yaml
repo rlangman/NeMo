@@ -60,8 +60,8 @@ train_feature_readers:
 context_emb_dim: 512
 aligner_context_emb_dim: 256
 
-context_hidden_dim: 768
-context_filters: 3072
+context_hidden_dim: 512
+context_filters: 2048
 
 text_hidden_dim: 768
 text_filters: 3072
