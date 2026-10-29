@@ -208,7 +208,6 @@ model:
   text_encoder:
     _target_: nemo.collections.tts.modules.discrete_speech_modules.TextEncoder
     d_model: ${text_hidden_dim}
-    d_context: ${context_emb_dim}
     transformer:
       _target_: nemo.collections.tts.modules.transformer_2501.Transformer
       n_layers: 10
@@ -267,6 +266,7 @@ model:
 
   duration_decoder:
     _target_: nemo.collections.tts.modules.discrete_speech_modules.DurationDecoder
+    d_context: ${context_emb_dim}
     input_dim: ${text_hidden_dim}
     d_model: ${duration_hidden_dim}
     num_duration: ${num_duration}
