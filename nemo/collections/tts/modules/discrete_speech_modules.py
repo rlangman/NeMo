@@ -855,9 +855,6 @@ class AudioDecoder(NeuralModule):
 
         self.input_layer = torch.nn.Linear(input_dim, d_model)
         self.parallel_transformer = parallel_transformer
-        self.semantic_parallel_predict_layer = AudioPredictionLayer(
-            input_dim=d_model, num_codebooks=1, codebook_size=codebook_size
-        )
 
         self.audio_input_layer = AudioInputLayer(
             input_dim=self.codebook_emb_dim,
@@ -890,11 +887,8 @@ class AudioDecoder(NeuralModule):
         hidden_state = self.input_layer(hidden_state)
         hidden_state = hidden_state * audio_mask_3d
         hidden_state = self.parallel_transformer(x=hidden_state, x_mask=audio_mask)['output']
-        semantic_tokens_parallel, semantic_logits_parallel = self.semantic_parallel_predict_layer(
-            hidden_state=hidden_state, audio_mask=audio_mask, topk=None, temperature=None
-        )
 
-        return semantic_tokens_parallel, semantic_logits_parallel, hidden_state
+        return hidden_state
 
     def _forward_semantic(self, hidden_state, audio_len, audio_codes, topk=None, temperature=None, cond_mask=None):
         audio_mask = get_mask_from_lengths(audio_len)
@@ -992,8 +986,6 @@ class AudioDecoder(NeuralModule):
     @property
     def output_types(self):
         return {
-            "semantic_tokens_parallel": NeuralType(('B', 'C', 'T_audio'), TokenIndex()),
-            "semantic_logits_parallel": NeuralType(('B', 'C', 'W', 'T_audio'), LogitsType()),
             "semantic_tokens": NeuralType(('B', 'C', 'T_audio'), TokenIndex()),
             "semantic_logits": NeuralType(('B', 'C', 'W', 'T_audio'), LogitsType()),
             "acoustic_tokens": NeuralType(('B', 'C', 'T_audio'), TokenIndex()),
@@ -1002,7 +994,7 @@ class AudioDecoder(NeuralModule):
 
     @typecheck()
     def forward(self, hidden_state, audio_len, audio_codes):
-        semantic_tokens_parallel, semantic_logits_parallel, hidden_state = self._forward_parallel(
+        hidden_state = self._forward_parallel(
             hidden_state=hidden_state,
             audio_len=audio_len,
         )
@@ -1018,8 +1010,6 @@ class AudioDecoder(NeuralModule):
         )
 
         return (
-            semantic_tokens_parallel,
-            semantic_logits_parallel,
             semantic_tokens,
             semantic_logits,
             acoustic_tokens,
@@ -1032,7 +1022,6 @@ class AudioDecoder(NeuralModule):
         audio_len,
         frames_per_iter,
         vector_quantizer,
-        infer_weight=1.0,
         topk=None,
         temperature=None,
         cond_layers=None,
@@ -1056,8 +1045,6 @@ class AudioDecoder(NeuralModule):
         if cond_layers is None:
             cond_layers = set(range(len(self.acoustic_layers)))
 
-        ar_weight = infer_weight / (1.0 + infer_weight)
-        parallel_weight = 1.0 / (1.0 + infer_weight)
         batch_size = inputs.shape[0]
         # [B, T]
         audio_mask = get_mask_from_lengths(audio_len, pad_to_factor=frames_per_iter)
@@ -1091,10 +1078,9 @@ class AudioDecoder(NeuralModule):
             context_len = torch.zeros_like(audio_len)
             prefix_mask = torch.zeros_like(audio_mask)
 
-        _, logits_parallel, hidden_state_input = self._forward_parallel(
+        hidden_state_input = self._forward_parallel(
             hidden_state=inputs, audio_len=audio_len_padded
         )
-        logits_parallel = rearrange(logits_parallel, 'B C W T -> B T C W')
 
         self.semantic_transformer.reset_cache(use_cache=True, frames_per_iter=frames_per_iter)
         for acoustic_layer in self.acoustic_layers:
@@ -1118,12 +1104,11 @@ class AudioDecoder(NeuralModule):
                 cond_mask=audio_cond_mask_i,
             )
             logits_i = rearrange(logits_i, 'B C W T -> B T C W')
-            logits = (parallel_weight * logits_parallel[:, :len_i]) + (ar_weight * logits_i)
 
             if topk is None:
-                semantic_tokens_i = logits.max(dim=3).indices
+                semantic_tokens_i = logits_i.max(dim=3).indices
             else:
-                semantic_tokens_i = sample_tokens(logits=logits, topk=topk, temperature=temperature)
+                semantic_tokens_i = sample_tokens(logits=logits_i, topk=topk, temperature=temperature)
 
             semantic_tokens_rearrange_i = rearrange(semantic_tokens_i, 'B T C -> C B T')
             # [B, D, T]

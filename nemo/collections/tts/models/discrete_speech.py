@@ -235,8 +235,6 @@ class DiscreteSpeechModel(ModelPT):
         output_types={
             "semantic_tokens_pred": NeuralType(('B', 'C', 'T_audio'), TokenIndex()),
             "semantic_logits": NeuralType(('B', 'C', 'W', 'T_audio'), LogitsType()),
-            "semantic_tokens_pred_pre": NeuralType(('B', 'C', 'T_audio'), TokenIndex()),
-            "semantic_logits_pre": NeuralType(('B', 'C', 'W', 'T_audio'), LogitsType()),
             "acoustic_tokens_pred": NeuralType(('B', 'C', 'T_audio'), TokenIndex()),
             "acoustic_logits": NeuralType(('B', 'C', 'W', 'T_audio'), LogitsType()),
             "dur_indices": NeuralType(('B', 'T_text'), TokenIndex()),
@@ -316,8 +314,6 @@ class DiscreteSpeechModel(ModelPT):
         text_enc_repeated, _ = regulate_len(durs, text_enc, pace=1.0)
         audio_codes = rearrange(audio_codes, 'B C T -> B T C')
         (
-            semantic_tokens_pred_pre,
-            semantic_logits_pre,
             semantic_tokens_pred,
             semantic_logits,
             acoustic_tokens_pred,
@@ -331,8 +327,6 @@ class DiscreteSpeechModel(ModelPT):
         return (
             semantic_tokens_pred,
             semantic_logits,
-            semantic_tokens_pred_pre,
-            semantic_logits_pre,
             acoustic_tokens_pred,
             acoustic_logits,
             dur_indices,
@@ -365,8 +359,6 @@ class DiscreteSpeechModel(ModelPT):
         (
             _,
             semantic_logits,
-            _,
-            semantic_logits_pre,
             _,
             acoustic_logits,
             dur_indices,
@@ -401,11 +393,6 @@ class DiscreteSpeechModel(ModelPT):
             logits=semantic_logits, target_tokens=semantic_tokens, mask=audio_mask
         )
         train_semantic_token_loss = self.audio_token_loss_scale * semantic_token_loss
-
-        semantic_token_loss_pre = self.semantic_token_loss_fn(
-            logits=semantic_logits_pre, target_tokens=semantic_tokens, mask=audio_mask
-        )
-        train_semantic_token_loss_pre = self.audio_token_loss_scale * semantic_token_loss_pre
 
         acoustic_token_loss = self.acoustic_token_loss_fn(
             logits=acoustic_logits, target_tokens=acoustic_tokens, mask=audio_mask
@@ -444,7 +431,6 @@ class DiscreteSpeechModel(ModelPT):
 
         loss = (
             train_semantic_token_loss
-            + train_semantic_token_loss_pre
             + train_acoustic_token_loss
             + train_dur_loss
             + train_dur_loss_pre
@@ -458,7 +444,6 @@ class DiscreteSpeechModel(ModelPT):
 
         metrics = {
             "t_semantic_token_loss": semantic_token_loss,
-            "t_semantic_token_loss_pre": semantic_token_loss_pre,
             "t_acoustic_token_loss": acoustic_token_loss,
             "t_duration_loss": duration_loss,
             "t_duration_loss_pre": duration_loss_pre,
@@ -481,8 +466,6 @@ class DiscreteSpeechModel(ModelPT):
         (
             semantic_tokens_pred,
             semantic_logits,
-            semantic_tokens_pred_pre,
-            semantic_logits_pre,
             acoustic_tokens_pred,
             acoustic_logits,
             dur_indices,
@@ -518,14 +501,6 @@ class DiscreteSpeechModel(ModelPT):
         semantic_token_correct = (semantic_tokens == semantic_tokens_pred) * rearrange(audio_mask, 'B T -> B 1 T')
         semantic_token_accuracy = semantic_token_correct.sum() / audio_len.sum() / self.semantic_codebook_num
 
-        semantic_token_loss_pre = self.semantic_token_loss_fn(
-            logits=semantic_logits_pre, target_tokens=semantic_tokens, mask=audio_mask
-        )
-        semantic_token_correct_pre = (semantic_tokens == semantic_tokens_pred_pre) * rearrange(
-            audio_mask, 'B T -> B 1 T'
-        )
-        semantic_token_accuracy_pre = semantic_token_correct_pre.sum() / audio_len.sum() / self.semantic_codebook_num
-
         acoustic_token_loss = self.acoustic_token_loss_fn(
             logits=acoustic_logits, target_tokens=acoustic_tokens, mask=audio_mask
         )
@@ -552,8 +527,6 @@ class DiscreteSpeechModel(ModelPT):
             "val_loss": semantic_token_loss,
             "val_semantic_token_loss": semantic_token_loss,
             "val_semantic_token_accuracy": semantic_token_accuracy,
-            "val_semantic_token_loss_pre": semantic_token_loss_pre,
-            "val_semantic_token_accuracy_pre": semantic_token_accuracy_pre,
             "val_acoustic_token_loss": acoustic_token_loss,
             "val_acoustic_token_accuracy": acoustic_token_accuracy,
             "val_duration_loss": duration_loss,
@@ -567,16 +540,16 @@ class DiscreteSpeechModel(ModelPT):
         dataset_loss_map = defaultdict(list)
         dataset_names = batch_dict.get("dataset_names")
         for i, dataset_name in enumerate(dataset_names):
-            semantic_token_loss_pre = self.semantic_token_loss_fn(
-                logits=semantic_logits_pre[i : i + 1],
+            semantic_token_loss = self.semantic_token_loss_fn(
+                logits=semantic_logits[i : i + 1],
                 target_tokens=semantic_tokens[i : i + 1],
                 mask=audio_mask[i : i + 1],
             )
-            semantic_token_loss_pre = semantic_token_loss_pre.cpu().item()
-            dataset_loss_map[dataset_name].append(semantic_token_loss_pre)
+            semantic_token_loss = semantic_token_loss.cpu().item()
+            dataset_loss_map[dataset_name].append(semantic_token_loss)
 
         for dataset_name, loss_list in dataset_loss_map.items():
-            metric_name = f"val_semantic_token_loss_pre_{dataset_name}"
+            metric_name = f"val_semantic_token_loss_{dataset_name}"
             metric_loss = np.mean(loss_list)
             metrics[metric_name] = metric_loss
 
@@ -731,7 +704,6 @@ class DiscreteSpeechModel(ModelPT):
             "context_tokens": NeuralType(('B', 'C', 'T_audio'), TokenIndex()),
             "context_len": NeuralType(tuple('B'), LengthsType()),
             "frames_per_iter": NeuralType((), IntType(), optional=True),
-            "audio_weight": NeuralType((), FloatType(), optional=True),
             "audio_topk": NeuralType((), IntType(), optional=True),
             "audio_temperature": NeuralType((), FloatType(), optional=True),
             "acoustic_topk": NeuralType((), IntType(), optional=True),
@@ -759,7 +731,6 @@ class DiscreteSpeechModel(ModelPT):
         context_tokens,
         context_len,
         frames_per_iter=1,
-        audio_weight=1.0,
         audio_topk=None,
         audio_temperature=1.0,
         acoustic_topk=None,
@@ -801,7 +772,7 @@ class DiscreteSpeechModel(ModelPT):
 
         # Keep the aligned context's trailing space and omit a duplicate
         # leading space from the target when joining the two sequences.
-        context_last = context_text.gather(1, (context_text_len - 1).unsqueeze(1)).squeeze(1)
+        context_last = context_text.gather(1, (context_text_len.long() - 1).unsqueeze(1)).squeeze(1)
         text_start = ((context_last == self.space_token) & (text[:, 0] == self.space_token)).long()
         combined_text = torch.nn.utils.rnn.pad_sequence(
             [
@@ -850,7 +821,6 @@ class DiscreteSpeechModel(ModelPT):
             audio_len=audio_len,
             frames_per_iter=frames_per_iter,
             vector_quantizer=self.vector_quantizer,
-            infer_weight=audio_weight,
             topk=audio_topk,
             temperature=audio_temperature,
             cond_layers=cond_layers,

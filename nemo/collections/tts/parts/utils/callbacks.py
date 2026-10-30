@@ -762,7 +762,6 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
         log_audio: bool = False,
         log_alignment: bool = False,
         frames_per_iter: int = 1,
-        audio_weight: float = 1.0,
         audio_topk: Optional[int] = None,
         audio_temperature: Optional[float] = 1.0,
         acoustic_topk: Optional[int] = None,
@@ -777,7 +776,6 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
         self.log_audio = log_audio
         self.log_alignment = log_alignment
         self.frames_per_iter = frames_per_iter
-        self.audio_weight = audio_weight
         self.audio_topk = audio_topk
         self.audio_temperature = audio_temperature
         self.acoustic_topk = acoustic_topk
@@ -845,7 +843,6 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
                 context_tokens=audio_tokens,
                 context_len=audio_len,
                 frames_per_iter=self.frames_per_iter,
-                audio_weight=self.audio_weight,
                 audio_topk=self.audio_topk,
                 audio_temperature=self.audio_temperature,
                 acoustic_topk=self.acoustic_topk,
