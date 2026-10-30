@@ -38,6 +38,19 @@ def _duration_decoder():
     ).eval()
 
 
+def _audio_decoder():
+    return AudioDecoder(
+        parallel_transformer=_transformer(),
+        semantic_transformer=_transformer(is_causal=True),
+        acoustic_transformer_kwargs=dict(n_layers=1, d_model=8, d_ffn=16, sa_n_heads=2, kernel_size=1, is_causal=True),
+        input_dim=8,
+        d_model=8,
+        num_acoustic_codebooks=2,
+        codebook_size=4,
+        codebook_dim=2,
+    )
+
+
 @pytest.mark.unit
 def test_text_encoder_without_context():
     encoder = TextEncoder(
@@ -235,16 +248,7 @@ def test_discrete_speech_infer_context_prefix(predict_speaking_rate, max_infer_l
 @pytest.mark.parametrize("use_prefix", [False, True])
 def test_audio_decoder_infer_audio_prefix(frames_per_iter, use_prefix):
     quantizer = GroupFiniteScalarQuantizer(num_groups=3, num_levels_per_group=[2, 2])
-    decoder = AudioDecoder(
-        parallel_transformer=_transformer(),
-        semantic_transformer=_transformer(is_causal=True),
-        acoustic_transformer_kwargs=dict(n_layers=1, d_model=8, d_ffn=16, sa_n_heads=2, kernel_size=1, is_causal=True),
-        input_dim=8,
-        d_model=8,
-        num_acoustic_codebooks=2,
-        codebook_size=4,
-        codebook_dim=2,
-    ).eval()
+    decoder = _audio_decoder().eval()
     prefix_tokens = torch.tensor([[[3, 2, 1], [2, 1, 3], [1, 3, 2]], [[2, 0, 0], [3, 0, 0], [1, 0, 0]]])
     prefix_len = torch.tensor([3, 1])
     prefix_codes = quantizer.decode(indices=prefix_tokens.permute(1, 0, 2), input_len=prefix_len).transpose(1, 2)
@@ -335,3 +339,39 @@ def test_discrete_speech_infer_single_boundary_space():
     torch.testing.assert_close(model.aligner.call_args.kwargs['text_len'], context_text_len)
     torch.testing.assert_close(text, original_text)
     torch.testing.assert_close(context_text, original_context_text)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("sequence_len", [32, 75, 80])
+@pytest.mark.parametrize("mask_mode", ["dropout", "explicit_train", "explicit_eval"])
+def test_audio_decoder_masking_preserves_first_75_timesteps(sequence_len, mask_mode):
+    decoder = _audio_decoder()
+    layers = [decoder.audio_input_layer] + [layer.input_layer for layer in decoder.acoustic_layers]
+    lengths = torch.tensor([sequence_len, sequence_len - 5])
+    requested_mask = torch.ones(2, sequence_len, dtype=torch.bool)
+    valid = torch.arange(sequence_len)[None, :] < lengths[:, None]
+
+    for layer in layers:
+        layer.train(mask_mode != "explicit_eval")
+        with torch.no_grad():
+            layer.hidden_layer.weight.fill_(1.0)
+            layer.hidden_layer.bias.zero_()
+            layer.output_layer.weight.copy_(torch.eye(8))
+            layer.output_layer.bias.zero_()
+        codes = torch.ones(2, sequence_len, layer.hidden_layer.in_features, requires_grad=True)
+        expected = layer.output_layer(layer.hidden_layer(codes))
+        expected = expected * valid.unsqueeze(-1)
+        expected[:, 75:] = 0
+        kwargs = {} if mask_mode == "dropout" else {"cond_mask": requested_mask}
+        with patch.object(layer.masking, 'create_mask', return_value=requested_mask):
+            output = layer(
+                hidden_state=torch.zeros(2, sequence_len, 8),
+                audio_codes=codes,
+                audio_len=lengths,
+                **kwargs,
+            )
+        torch.testing.assert_close(output, expected)
+        output.sum().backward()
+        assert torch.count_nonzero(codes.grad[:, : min(75, sequence_len - 5)]) > 0
+        assert torch.count_nonzero(codes.grad[:, 75:]) == 0
+        assert requested_mask.all(), "The caller's mask must remain unchanged"

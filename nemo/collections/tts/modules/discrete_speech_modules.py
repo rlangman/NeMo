@@ -116,11 +116,12 @@ class Conv1d(NeuralModule):
 
 
 class FeatureMasking(NeuralModule):
-    def __init__(self, mask_min: float, mask_max: float, mask_alpha: float = 2.0, mask_beta: float = 1.0):
+    def __init__(self, mask_min: float, mask_max: float, mask_alpha: float = 2.0, mask_beta: float = 1.0, unmask_len=0):
         super().__init__()
         self.mask_min = mask_min
         self.mask_max = mask_max
         self.mask_dist = torch.distributions.beta.Beta(concentration1=mask_alpha, concentration0=mask_beta)
+        self.unmask_len = unmask_len
 
     def forward(self, inputs, mask):
         mask = rearrange(mask, 'B T -> B T 1')
@@ -135,6 +136,7 @@ class FeatureMasking(NeuralModule):
 
     def apply_dropout(self, inputs, input_len):
         mask = self.create_mask(input_len=input_len)
+        mask[:, :self.unmask_len] = False
         out = self.forward(inputs=inputs, mask=mask)
         return out
 
@@ -737,12 +739,12 @@ class DurationDecoder(NeuralModule):
 
 class AudioInputLayer(NeuralModule):
 
-    def __init__(self, input_dim, output_dim, audio_mask_min=0.0, audio_mask_max=0.7):
+    def __init__(self, input_dim, output_dim, audio_mask_min=0.0, audio_mask_max=0.7, unmask_len=75):
         super(AudioInputLayer, self).__init__()
         self.hidden_layer = torch.nn.Linear(input_dim, output_dim)
         self.output_layer = torch.nn.Linear(output_dim, output_dim)
 
-        self.masking = FeatureMasking(mask_min=audio_mask_min, mask_max=audio_mask_max)
+        self.masking = FeatureMasking(mask_min=audio_mask_min, mask_max=audio_mask_max, unmask_len=unmask_len)
 
     def forward(self, hidden_state, audio_codes, audio_len, cond_mask=None):
         audio_mask = get_mask_from_lengths(audio_len)
@@ -751,7 +753,7 @@ class AudioInputLayer(NeuralModule):
         res = self.output_layer(res)
 
         if cond_mask is not None:
-            res = self.masking.forward(inputs=res, mask=cond_mask)
+            res = self.masking(inputs=res, mask=cond_mask)
         elif self.training:
             res = self.masking.apply_dropout(inputs=res, input_len=audio_len)
 
@@ -1078,9 +1080,7 @@ class AudioDecoder(NeuralModule):
             context_len = torch.zeros_like(audio_len)
             prefix_mask = torch.zeros_like(audio_mask)
 
-        hidden_state_input = self._forward_parallel(
-            hidden_state=inputs, audio_len=audio_len_padded
-        )
+        hidden_state_input = self._forward_parallel(hidden_state=inputs, audio_len=audio_len_padded)
 
         self.semantic_transformer.reset_cache(use_cache=True, frames_per_iter=frames_per_iter)
         for acoustic_layer in self.acoustic_layers:
