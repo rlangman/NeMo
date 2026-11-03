@@ -418,6 +418,7 @@ class TextEncoder(NeuralModule):
         eos_id,
         space_id,
         space_dur,
+        llm_dim=640,
         mask_min=0.0,
         mask_max=0.0,
         mask_alpha=1.0,
@@ -427,6 +428,7 @@ class TextEncoder(NeuralModule):
 
         self.word_emb = torch.nn.Embedding(n_embed, d_model, padding_idx=padding_idx)
         self.context_cond_layer = torch.nn.Linear(d_context, self.d_model)
+        self.llm_cond_layer = torch.nn.Linear(llm_dim, self.d_model)
         self.transformer = transformer
         if down_sample_rate and down_sample_rate > 1:
             self.downsample_layer = TextDownSampling(
@@ -455,6 +457,7 @@ class TextEncoder(NeuralModule):
             "text": NeuralType(('B', 'T_text'), EncodedRepresentation()),
             "text_len": NeuralType(('B'), LengthsType()),
             "context_emb": NeuralType(('B', 'D'), EncodedRepresentation()),
+            "llm_emb": NeuralType(('B', 'T_text', 'D'), EncodedRepresentation()),
         }
 
     @property
@@ -466,9 +469,13 @@ class TextEncoder(NeuralModule):
         }
 
     @typecheck()
-    def forward(self, text, text_len, context_emb):
+    def forward(self, text, text_len, context_emb, llm_emb):
         text_mask = get_mask_from_lengths(text_len)
         text_emb = self.word_emb(text)
+
+        llm_cond = self.llm_cond_layer(llm_emb)
+        text_emb = text_emb + llm_cond
+        text_emb = text_emb * rearrange(text_mask, 'B T -> B T 1')
 
         if self.training and self.text_masking is not None:
             text_emb = self.text_masking.apply_dropout(inputs=text_emb, input_len=text_len)

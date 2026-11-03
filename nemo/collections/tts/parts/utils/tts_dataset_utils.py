@@ -216,6 +216,28 @@ def stack_tensors(tensors: List[torch.Tensor], max_lens: List[int], pad_value: f
     return stacked_tensor
 
 
+def stack_tensors_3d(tensors: List[torch.Tensor], max_len: int, pad_value: float = 0.0) -> torch.Tensor:
+    """
+    Create batch by stacking input tensor list along the time axes.
+
+    Args:
+        tensors: List of tensors to pad and stack
+        max_lens: List of lengths to pad each axis to, starting with the last axis
+        pad_value: Value for padding
+
+    Returns:
+        Padded and stacked tensor.
+    """
+    padded_tensors = []
+    for tensor in tensors:
+        padding = (0, 0, 0, max_len - tensor.shape[0])
+        padded_tensor = torch.nn.functional.pad(tensor, pad=padding, value=pad_value)
+        padded_tensors.append(padded_tensor)
+
+    stacked_tensor = torch.stack(padded_tensors)
+    return stacked_tensor
+
+
 def logbeta(x, y):
     return gammaln(x) + gammaln(y) - gammaln(x + y)
 
@@ -310,23 +332,23 @@ def filter_dataset(
     for entry in entries:
         duration = entry["duration"]
         total_duration += duration
+
         if (min_duration and duration < min_duration) or (max_duration and duration > max_duration):
             continue
 
-        if min_words:
-            if "normalized_text" in entry:
-                text = entry["normalized_text"]
-                text = re.sub(r"\s+", " ", text)
-                text = text.strip()
-                entry["normalized_text"] = text
-            elif "text" in entry:
-                text = entry["text"]
-                text = re.sub(r"\s+", " ", text)
-                text = text.strip()
-                entry["text"] = text
-            else:
-                raise ValueError(f"Received min_words but entry has no text field: {entry}")
+        if "normalized_text" in entry:
+            text = entry["normalized_text"]
+            entry.pop("normalized_text")
+        else:
+            text = entry["text"]
 
+        text = text.replace("[", "")
+        text = text.replace("]", "")
+        text = re.sub(r"\s+", " ", text)
+        text = text.strip()
+        entry["text"] = text
+
+        if min_words:
             if max_text_per_second:
                 if len(text) > max_text_per_second * entry["duration"]:
                     continue
@@ -1043,3 +1065,13 @@ def get_text_processor(language: str) -> TextProcessor:
     else:
         logging.info(f"Text processing not implemented for language {language}; using default processor")
         return DefaultTextProcessor()
+
+
+def parse_tokens(tokens):
+    durs = [1] # BOS token is included in metadata with duration 0
+    for (token_id, text, start, end) in tokens[1:]:
+        durs.append(end - start)
+    durs.append(1) # Add EOS token
+    durs = torch.IntTensor(durs)
+    num_tokens = len(tokens) + 1
+    return durs, num_tokens

@@ -25,17 +25,21 @@ from hydra.utils import instantiate
 from lightning.pytorch import Trainer
 from omegaconf import DictConfig
 
+from huggingface_hub import login
+from transformers import AutoConfig, AutoProcessor
+from transformers.models.t5gemma2.modeling_t5gemma2 import T5Gemma2TextEncoder
+
 from nemo.collections.common.parts.utils import mask_sequence_tensor
 from nemo.collections.tts.data.text_to_speech_dataset import create_text_to_speech_dataset
 from nemo.collections.tts.losses.aligner_loss import BinLoss, ForwardSumLoss
 from nemo.collections.tts.losses.discrete_speech_loss import AudioTokenLoss, MaskedSoftmax, SpeakingRateLoss
 from nemo.collections.tts.parts.utils.callbacks import LoggingCallback
-from nemo.collections.tts.parts.utils.helpers import get_mask_from_lengths, regulate_len, stack_tensors
+from nemo.collections.tts.parts.utils.helpers import get_mask_from_lengths, regulate_len
+from nemo.collections.tts.parts.utils.tts_dataset_utils import stack_tensors
 from nemo.core import ModelPT
 from nemo.core.classes.common import PretrainedModelInfo, typecheck
 from nemo.core.neural_types.elements import (
     FloatType,
-    IntType,
     LengthsType,
     LogitsType,
     LogprobsType,
@@ -128,10 +132,31 @@ class DiscreteSpeechModel(ModelPT):
             self.aligner.eval()
             self.aligner.freeze()
 
-        self.duration_infill_min = cfg.get("duration_infill_min", 0.25)
-        self.duration_infill_max = cfg.get("duration_infill_max", 1.0)
-        duration_infill_beta = cfg.get("duration_infill_beta", 2.0)
-        self.duration_infill_dist = torch.distributions.beta.Beta(concentration1=1.0, concentration0=duration_infill_beta)
+        llm_model_name = "google/t5gemma-2-270m-270m"
+
+        try:
+            llm_config = AutoConfig.from_pretrained(llm_model_name, local_files_only=True)
+            self.llm_tokenizer = AutoProcessor.from_pretrained(llm_model_name, local_files_only=True)
+            self.llm_encoder = T5Gemma2TextEncoder.from_pretrained(
+                llm_model_name,
+                config=llm_config.encoder.text_config,
+                key_mapping={r"^model\.encoder\.": ""},
+                local_files_only=True,
+            )
+        except OSError:
+            print("Downloading LLM from HF")
+            llm_config = AutoConfig.from_pretrained(llm_model_name, local_files_only=False)
+            self.llm_tokenizer = AutoProcessor.from_pretrained(llm_model_name, local_files_only=False)
+            self.llm_encoder = T5Gemma2TextEncoder.from_pretrained(
+                llm_model_name,
+                config=llm_config.encoder.text_config,
+                key_mapping={r"^model\.encoder\.": ""},
+                local_files_only=False,
+            )
+
+        self.llm_encoder.eval()
+        for param in self.llm_encoder.parameters():
+            param.requires_grad = False
 
         # Reconstruction losses
         self.audio_token_loss_scale = cfg.get("audio_token_loss_scale", 1.0)
@@ -191,6 +216,55 @@ class DiscreteSpeechModel(ModelPT):
         token_tensor = torch.tensor(text_tokens).unsqueeze_(0).long().to(self.device)
         return token_tensor
 
+    def get_llm_emb(self, text_list):
+        inputs = self.llm_tokenizer(
+            text=text_list,
+            padding=True,
+            return_offsets_mapping=True,
+            return_special_tokens_mask=True,
+            return_tensors="pt",
+        )
+        token_ids = inputs["input_ids"]
+        offsets = inputs["offset_mapping"]
+        attention_mask = inputs["attention_mask"]
+
+        with torch.no_grad():
+            inputs = inputs.to(self.llm_encoder.device)
+            output = self.llm_encoder(**inputs, return_dict=True)
+            llm_emb = output.last_hidden_state
+            llm_emb = llm_emb * rearrange(attention_mask.to(self.llm_encoder.device), 'B T -> B T 1')
+
+        llm_dur_list = []
+        max_len = 0
+        for i in range(len(text_list)):
+            durs = []
+            for token_id, (start, end), keep in zip(
+                token_ids[i].tolist(),
+                offsets[i].tolist(),
+                attention_mask[i].tolist(),
+            ):
+                if not keep:
+                    continue
+                if token_id == 2:
+                    # BOS token
+                    durs.append(1)
+                else:
+                    dur = end - start
+                    durs.append(dur)
+
+            # Include EOS duration
+            durs.append(1)
+            max_len = max(max_len, len(durs))
+            durs = torch.IntTensor(durs)
+            llm_dur_list.append(durs)
+
+        llm_durs = stack_tensors(tensors=llm_dur_list, max_lens=[max_len]).to(llm_emb.device)
+
+        llm_emb = torch.nn.functional.pad(llm_emb, (0, 0, 0, 1)) # Add EOS
+        llm_emb, _ = regulate_len(llm_durs, llm_emb, pace=1.0)
+
+        return llm_emb
+
     def _sample_lens(self, batch_size, audio_lens, random_sample, max_len=None):
         if max_len is None:
             max_len = self.context_max_len
@@ -231,6 +305,7 @@ class DiscreteSpeechModel(ModelPT):
     def _slice_context_information(
         self,
         text,
+        llm_emb,
         durs,
         audio_tokens,
         audio_codes,
@@ -247,6 +322,7 @@ class DiscreteSpeechModel(ModelPT):
     ):
         context_list = []
         target_text_list = []
+        target_llm_emb_list = []
         target_dur_list = []
         target_audio_token_list = []
         target_audio_code_list = []
@@ -266,6 +342,7 @@ class DiscreteSpeechModel(ModelPT):
                 context_i = context_i[:, : self.context_max_len]
 
             text_i = text[i, text_start_i:text_end_i]
+            llm_emb_i = llm_emb[i, :, text_start_i:text_end_i]
             dur_i = durs[i, text_start_i:text_end_i]
 
             audio_tokens_i = audio_tokens[i, :, audio_start_i:audio_end_i]
@@ -273,6 +350,7 @@ class DiscreteSpeechModel(ModelPT):
 
             context_list.append(context_i)
             target_text_list.append(text_i)
+            target_llm_emb_list.append(llm_emb_i)
             target_dur_list.append(dur_i)
             target_audio_token_list.append(audio_tokens_i)
             target_audio_code_list.append(audio_codes_i)
@@ -282,6 +360,7 @@ class DiscreteSpeechModel(ModelPT):
 
         max_text_len = target_text_lens.max().item()
         target_text = stack_tensors(tensors=target_text_list, max_lens=[max_text_len]).to(audio_codes.device)
+        target_llm_emb = stack_tensors(tensors=target_llm_emb_list, max_lens=[max_text_len]).to(audio_codes.device)
         target_durs = stack_tensors(tensors=target_dur_list, max_lens=[max_text_len]).to(audio_codes.device)
 
         max_audio_len = target_audio_lens.max().item()
@@ -292,7 +371,7 @@ class DiscreteSpeechModel(ModelPT):
             audio_codes.device
         )
 
-        return context_codes, context_output_lens, target_text, target_durs, target_audio_tokens, target_audio_codes
+        return context_codes, context_output_lens, target_text, target_llm_emb, target_durs, target_audio_tokens, target_audio_codes
 
     def get_context(self, audio_tokens, audio_len):
         context_tokens = audio_tokens[:, :, :self.context_max_len]
@@ -308,7 +387,7 @@ class DiscreteSpeechModel(ModelPT):
         return context_emb
 
     def sample_context_audio_start(
-        self, audio_tokens, audio_codes, audio_lens, text, durs, text_lens, random_sample, max_len=None
+        self, audio_tokens, audio_codes, audio_lens, text, durs, text_lens, llm_emb, random_sample, max_len=None
     ):
         batch_size = audio_codes.shape[0]
         max_audio_len = audio_tokens.shape[2]
@@ -337,9 +416,10 @@ class DiscreteSpeechModel(ModelPT):
         target_audio_lens = torch.maximum(target_audio_lens, target_text_lens)
 
         zero_starts = torch.zeros(batch_size, dtype=torch.int32)
-        context_codes, context_lens, target_text, target_durs, target_audio_tokens, target_audio_codes = (
+        context_codes, context_lens, target_text, target_llm_emb, target_durs, target_audio_tokens, target_audio_codes = (
             self._slice_context_information(
                 text=text,
+                llm_emb=llm_emb,
                 durs=durs,
                 audio_tokens=audio_tokens,
                 audio_codes=audio_codes,
@@ -358,6 +438,7 @@ class DiscreteSpeechModel(ModelPT):
 
         return (
             target_text,
+            target_llm_emb,
             target_durs,
             target_text_lens,
             target_audio_tokens,
@@ -367,7 +448,7 @@ class DiscreteSpeechModel(ModelPT):
             context_lens,
         )
 
-    def sample_context_audio_end(self, audio_tokens, audio_codes, audio_lens, text, durs):
+    def sample_context_audio_end(self, audio_tokens, audio_codes, audio_lens, text, durs, llm_emb):
         batch_size = audio_codes.shape[0]
         max_audio_len = audio_tokens.shape[2]
         # [B, 1]
@@ -391,9 +472,10 @@ class DiscreteSpeechModel(ModelPT):
         target_audio_lens = torch.maximum(target_audio_lens, target_text_lens)
 
         zero_starts = torch.zeros(batch_size, dtype=torch.int32)
-        context_codes, context_lens, target_text, target_durs, target_audio_tokens, target_audio_codes = (
+        context_codes, context_lens, target_text, target_llm_emb, target_durs, target_audio_tokens, target_audio_codes = (
             self._slice_context_information(
                 text=text,
+                llm_emb=llm_emb,
                 durs=durs,
                 audio_tokens=audio_tokens,
                 audio_codes=audio_codes,
@@ -412,6 +494,7 @@ class DiscreteSpeechModel(ModelPT):
 
         return (
             target_text,
+            target_llm_emb,
             target_durs,
             target_text_lens,
             target_audio_tokens,
@@ -431,10 +514,11 @@ class DiscreteSpeechModel(ModelPT):
         out = torch.cat([out1, out2], dim=0)
         return out
 
-    def sample_context_audio_batch(self, audio_tokens, audio_codes, audio_lens, text, text_lens, durs):
+    def sample_context_audio_batch(self, audio_tokens, audio_codes, audio_lens, text, text_lens, durs, llm_emb):
         half_batch_size = audio_tokens.shape[0] // 2
         (
             text_sample1,
+            llm_emb_sample1,
             dur_sample1,
             text_sample_lens1,
             audio_token_sample1,
@@ -449,10 +533,12 @@ class DiscreteSpeechModel(ModelPT):
             text=text[:half_batch_size],
             text_lens=text_lens[:half_batch_size],
             durs=durs[:half_batch_size],
+            llm_emb=llm_emb[:half_batch_size],
             random_sample=True,
         )
         (
             text_sample2,
+            llm_emb_sample2,
             dur_sample2,
             text_sample_lens2,
             audio_token_sample2,
@@ -466,8 +552,10 @@ class DiscreteSpeechModel(ModelPT):
             audio_lens=audio_lens[half_batch_size:],
             text=text[half_batch_size:],
             durs=durs[half_batch_size:],
+            llm_emb=llm_emb[half_batch_size:],
         )
         text_sample = self._concat_tensors(text_sample1, text_sample2, pad_value=self.text_pad_token)
+        llm_emb_sample = self._concat_tensors(llm_emb_sample1, llm_emb_sample2)
         dur_sample = self._concat_tensors(dur_sample1, dur_sample2)
         text_sample_lens = torch.cat([text_sample_lens1, text_sample_lens2], dim=0)
         audio_token_sample = self._concat_tensors(audio_token_sample1, audio_token_sample2)
@@ -478,6 +566,7 @@ class DiscreteSpeechModel(ModelPT):
 
         return (
             text_sample,
+            llm_emb_sample,
             dur_sample,
             text_sample_lens,
             audio_token_sample,
@@ -493,6 +582,7 @@ class DiscreteSpeechModel(ModelPT):
             "text_len": NeuralType(tuple('B'), LengthsType()),
             "audio_tokens": NeuralType(('B', 'C', 'T_audio'), TokenIndex()),
             "audio_len": NeuralType(tuple('B'), LengthsType()),
+            "llm_emb": NeuralType(('B', 'T_text', 'D'), TokenIndex()),
         },
         output_types={
             "audio_token_sample": NeuralType(('B', 'C', 'T_audio'), TokenIndex()),
@@ -523,6 +613,7 @@ class DiscreteSpeechModel(ModelPT):
         text_len,
         audio_tokens,
         audio_len,
+        llm_emb,
     ):
         # Get duration information
         audio_tokens_rearrange = rearrange(audio_tokens, 'B C T -> C B T')
@@ -541,9 +632,11 @@ class DiscreteSpeechModel(ModelPT):
         speaking_rate = speaking_rate.detach()
         speaking_rate_indices = speaking_rate_indices.detach()
 
+        llm_emb = rearrange(llm_emb, 'B T D -> B D T')
         if self.training:
             (
                 text_sample,
+                llm_emb_sample,
                 dur_sample,
                 text_sample_len,
                 audio_token_sample,
@@ -558,10 +651,12 @@ class DiscreteSpeechModel(ModelPT):
                 text=text,
                 text_lens=text_len,
                 durs=durs,
+                llm_emb=llm_emb,
             )
         else:
             (
                 text_sample,
+                llm_emb_sample,
                 dur_sample,
                 text_sample_len,
                 audio_token_sample,
@@ -576,6 +671,7 @@ class DiscreteSpeechModel(ModelPT):
                 text=text,
                 text_lens=text_len,
                 durs=durs,
+                llm_emb=llm_emb,
                 random_sample=False,
             )
 
@@ -588,7 +684,8 @@ class DiscreteSpeechModel(ModelPT):
         speaking_rate_indices_pred, speaking_rate_logits = self.speaking_rate_predictor(context_emb=context_emb)
 
         # [batch_size, text_len, hidden_dim]
-        text_enc, dur_len, _ = self.text_encoder(text=text_sample, text_len=text_sample_len, context_emb=context_emb)
+        llm_emb_sample = rearrange(llm_emb_sample, 'B D T -> B T D')
+        text_enc, dur_len, _ = self.text_encoder(text=text_sample, text_len=text_sample_len, context_emb=context_emb, llm_emb=llm_emb_sample)
 
         dur_indices_pred, dur_logits, dur_indices_pred_pre, dur_logits_pre = self.duration_decoder(
             inputs=text_enc,
@@ -635,6 +732,9 @@ class DiscreteSpeechModel(ModelPT):
         audio_tokens = batch_dict.get("audio_tokens")
         audio_len = batch_dict.get("audio_token_lens")
 
+        text_list = batch_dict.get("text_string")
+        llm_emb = self.get_llm_emb(text_list)
+
         (
             audio_token_sample,
             audio_token_sample_len,
@@ -661,6 +761,7 @@ class DiscreteSpeechModel(ModelPT):
             text_len=text_len,
             audio_tokens=audio_tokens,
             audio_len=audio_len,
+            llm_emb=llm_emb,
         )
 
         semantic_tokens = audio_token_sample[:, : self.semantic_codebook_num, :]
@@ -747,6 +848,9 @@ class DiscreteSpeechModel(ModelPT):
         audio_tokens = batch_dict.get("audio_tokens")
         audio_len = batch_dict.get("audio_token_lens")
 
+        text_list = batch_dict.get("text_string")
+        llm_emb = self.get_llm_emb(text_list)
+
         (
             audio_token_sample,
             audio_token_sample_len,
@@ -773,6 +877,7 @@ class DiscreteSpeechModel(ModelPT):
             text_len=text_len,
             audio_tokens=audio_tokens,
             audio_len=audio_len,
+            llm_emb=llm_emb,
         )
 
         audio_mask = get_mask_from_lengths(audio_token_sample_len)
@@ -998,37 +1103,11 @@ class DiscreteSpeechModel(ModelPT):
 
         return speaking_rate, speaking_rate_indices
 
-
-    @typecheck(
-        input_types={
-            "text": NeuralType(('B', 'T_text'), TokenIndex()),
-            "text_len": NeuralType(tuple('B'), LengthsType()),
-            "context_tokens": NeuralType(('B', 'C', 'T_audio'), TokenIndex()),
-            "context_len": NeuralType(tuple('B'), LengthsType()),
-            "frames_per_iter": NeuralType((), IntType(), optional=True),
-            "audio_weight": NeuralType((), FloatType(), optional=True),
-            "audio_topk": NeuralType((), IntType(), optional=True),
-            "audio_temperature": NeuralType((), FloatType(), optional=True),
-            "acoustic_topk": NeuralType((), IntType(), optional=True),
-            "acoustic_temperature": NeuralType((), FloatType(), optional=True),
-            "duration_weight": NeuralType((), FloatType(), optional=True),
-            "duration_topk": NeuralType((), IntType(), optional=True),
-            "duration_temperature": NeuralType((), FloatType(), optional=True),
-            "speaking_rate": NeuralType(tuple('B'), FloatType(), optional=True),
-            "silence_pad_start": NeuralType((), IntType(), optional=True),
-            "silence_pad_end": NeuralType((), IntType(), optional=True),
-            "min_speaking_rate": NeuralType((), IntType(), optional=True),
-            "cond_layers": NeuralType((), IntType(), optional=True),
-        },
-        output_types={
-            "audio_tokens_pred": NeuralType(('B', 'C', 'T_token'), TokenIndex()),
-            "audio_token_lens": NeuralType(tuple('B'), LengthsType()),
-        },
-    )
     def infer(
         self,
         text,
         text_len,
+        text_string,
         context_tokens,
         context_len,
         frames_per_iter=1,
@@ -1044,10 +1123,13 @@ class DiscreteSpeechModel(ModelPT):
         silence_pad_start=None,
         silence_pad_end=None,
         cond_layers=None,
-        min_speaking_rate=-0.2,
+        min_speaking_rate=0.0,
         max_speaking_rate=0.5,
-        max_infer_length = 750,
+        max_infer_length=750,
     ):
+        llm_emb = self.get_llm_emb(text_string)
+        llm_emb = llm_emb.float()
+
         context_emb = self.get_context(audio_tokens=context_tokens, audio_len=context_len)
 
         if speaking_rate is None:
@@ -1056,7 +1138,7 @@ class DiscreteSpeechModel(ModelPT):
             speaking_rate = torch.clamp(speaking_rate, min=min_speaking_rate, max=max_speaking_rate)
 
         # [batch_size, text_len, hidden_dim]
-        text_enc, dur_len, text_durs = self.text_encoder(text=text, text_len=text_len, context_emb=context_emb)
+        text_enc, dur_len, text_durs = self.text_encoder(text=text, text_len=text_len, context_emb=context_emb, llm_emb=llm_emb)
         # [batch_size, text_len]
 
         dur_indices = self.duration_decoder.infer(

@@ -14,13 +14,11 @@
 
 import contextlib
 import io
-import json
 import math
 import os
 import random
 from dataclasses import dataclass
 from pathlib import Path
-import re
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -39,14 +37,12 @@ from nemo.collections.tts.parts.utils.tarred_dataset_utils import (
     FileFilterIterator,
     TarredMetadata,
     create_tarred_dataset,
-    process_tarred_manifest,
 )
 from nemo.collections.tts.parts.utils.tts_dataset_utils import (
     _read_audio,
     beta_binomial_prior_distribution,
     chunk_text_for_inference,
     get_tokenizer_for_language,
-    dropout_pc,
     filter_dataset,
     get_audio_filepaths,
     get_weighted_sampler,
@@ -75,9 +71,8 @@ class DatasetSample:
     audio_dir: Optional[Path]
     feature_dir: Optional[Path]
     text: str
-    speaker: str
-    speaker_index: int = None
     tokenizer_names: List[str] = None
+    tokens: List[Any] = None
 
 
 def create_text_to_speech_dataset(
@@ -128,15 +123,11 @@ def text_to_speech_collate_fn(
     feature_readers: List[FeatureReader],
     feature_processors: List[FeatureProcessor],
     text_pad_value: Optional[int],
-    include_speaker: bool,
 ):
     dataset_name_list = []
     audio_filepath_list = []
     token_list = []
     token_len_list = []
-    context_text_token_list = []
-    context_text_len_list = []
-    speaker_list = []
     text_list = []
 
     for example in batch:
@@ -144,16 +135,8 @@ def text_to_speech_collate_fn(
         audio_filepath_list.append(example["audio_filepath"])
         text_list.append(example["text"])
 
-        if "tokens" in example:
-            token_list.append(example["tokens"])
-            token_len_list.append(example["text_lens"])
-
-        if "context_text_tokens" in example:
-            context_text_token_list.append(example["context_text_tokens"])
-            context_text_len_list.append(example["context_text_lens"])
-
-        if include_speaker:
-            speaker_list.append(example["speaker_index"])
+        token_list.append(example["tokens"])
+        token_len_list.append(example["text_lens"])
 
     batch_dict = {
         "dataset_names": dataset_name_list,
@@ -168,15 +151,43 @@ def text_to_speech_collate_fn(
         batch_dict["text"] = batch_tokens
         batch_dict["text_lens"] = batch_token_len
 
-    if len(context_text_token_list) > 0:
-        batch_context_text_len = torch.IntTensor(context_text_len_list)
-        context_max_len = int(batch_context_text_len.max().item())
-        batch_context_tokens = stack_tensors(context_text_token_list, max_lens=[context_max_len], pad_value=text_pad_value)
-        batch_dict["context_text"] = batch_context_tokens
-        batch_dict["context_text_lens"] = batch_context_text_len
+    for feature_reader in feature_readers:
+        feature_dict = feature_reader.collate_fn(batch)
+        batch_dict.update(feature_dict)
 
-    if include_speaker:
-        batch_dict["speaker_id"] = torch.IntTensor(speaker_list)
+    for feature_processor in feature_processors:
+        processor_dict = feature_processor.collate_fn(batch)
+        batch_dict.update(processor_dict)
+
+    return batch_dict
+
+
+def tarred_text_to_speech_collate_fn(
+    batch: List[dict],
+    feature_readers: List[FeatureReader],
+    feature_processors: List[FeatureProcessor],
+    text_pad_value: Optional[int],
+):
+    token_list = []
+    token_len_list = []
+    text_list = []
+
+    for example in batch:
+        token_list.append(example["tokens"])
+        token_len_list.append(example["text_lens"])
+
+        text_list.append(example["text"])
+
+    batch_dict = {
+        "text_string": text_list,
+    }
+
+    if len(token_list) > 0:
+        batch_token_len = torch.IntTensor(token_len_list)
+        token_max_len = int(batch_token_len.max().item())
+        batch_tokens = stack_tensors(token_list, max_lens=[token_max_len], pad_value=text_pad_value)
+        batch_dict["text"] = batch_tokens
+        batch_dict["text_lens"] = batch_token_len
 
     for feature_reader in feature_readers:
         feature_dict = feature_reader.collate_fn(batch)
@@ -198,8 +209,6 @@ class TextToSpeechDataset(Dataset):
         text_tokenizer: Tokenizer to apply to the text field.
         weighted_sampling_steps_per_epoch: Optional int, If provided, then data will be sampled (with replacement)
             based on the sample weights provided in the dataset metadata. If None, then sample weights will be ignored.
-        speaker_path: Optional, path to JSON file with speaker indices, for multi-speaker training. Can be created with
-            scripts.dataset_processing.tts.create_speaker_map.py
         featurizers: Optional, list of featurizers to load feature data from. Should include the config provided
             when running scripts.dataset_processing.tts.compute_features.py before training.
         feature_processors: Optional, list of feature processors to run on training examples.
@@ -215,7 +224,6 @@ class TextToSpeechDataset(Dataset):
         dataset_meta: Dict,
         text_tokenizer: Optional[BaseTokenizer],
         weighted_sampling_steps_per_epoch: Optional[int] = None,
-        speaker_path: Optional[Path] = None,
         feature_readers: Optional[Dict[str, FeatureReader]] = None,
         feature_processors: Optional[Dict[str, FeatureProcessor]] = None,
         min_duration: Optional[float] = None,
@@ -233,14 +241,6 @@ class TextToSpeechDataset(Dataset):
 
         self.weighted_sampling_steps_per_epoch = weighted_sampling_steps_per_epoch
         self.pc_dropout_rate = pc_dropout_rate
-
-        if speaker_path:
-            self.include_speaker = True
-            with open(speaker_path, 'r', encoding="utf-8") as speaker_f:
-                self.speaker_index_map = json.load(speaker_f)
-        else:
-            self.include_speaker = False
-            self.speaker_index_map = None
 
         if feature_readers:
             logging.info(f"Found feature readers {feature_readers.keys()}")
@@ -305,30 +305,13 @@ class TextToSpeechDataset(Dataset):
         samples = []
         sample_weights = []
         for entry in filtered_entries:
-
-            if "normalized_text" in entry:
-                text = entry["normalized_text"]
-            else:
-                text = entry["text"]
-
-            text = re.sub(r"\s+", " ", text)
-            text = text.strip()
-
-            if self.include_speaker:
-                speaker = entry["speaker"]
-                speaker_index = self.speaker_index_map[speaker]
-            else:
-                speaker = None
-                speaker_index = 0
-
+            text = entry["text"]
             sample = DatasetSample(
                 dataset_name=dataset_name,
                 manifest_entry=entry,
                 audio_dir=None if dataset.audio_dir is None else Path(dataset.audio_dir),
                 feature_dir=None if dataset.feature_dir is None else Path(dataset.feature_dir),
                 text=text,
-                speaker=speaker,
-                speaker_index=speaker_index,
                 tokenizer_names=dataset.tokenizer_names,
             )
             samples.append(sample)
@@ -344,24 +327,21 @@ class TextToSpeechDataset(Dataset):
 
         _, audio_filepath_rel = get_audio_filepaths(manifest_entry=data.manifest_entry, audio_dir=data.audio_dir)
 
+        text = data.text
         example = {
             "dataset_name": data.dataset_name,
             "audio_filepath": audio_filepath_rel,
             "duration": data.manifest_entry["duration"],
-            "text": data.text,
+            "text": text,
         }
 
         if self.text_tokenizer is not None:
-            text = dropout_pc(text=data.text, dropout_rate=self.pc_dropout_rate)
+            #text = dropout_pc(text=text, dropout_rate=self.pc_dropout_rate)
             tokens = self.text_tokenizer(text)
             tokens = torch.tensor(tokens, dtype=torch.int32)
             text_len = tokens.shape[0]
             example["tokens"] = tokens
             example["text_lens"] = text_len
-
-        if data.speaker is not None:
-            example["speaker"] = data.speaker
-            example["speaker_index"] = data.speaker_index
 
         for feature_reader in self.feature_readers:
             feature_dict = feature_reader.load(
@@ -380,7 +360,6 @@ class TextToSpeechDataset(Dataset):
             feature_readers=self.feature_readers,
             feature_processors=self.feature_processors,
             text_pad_value=self.text_pad_value,
-            include_speaker=self.include_speaker,
         )
 
 
@@ -393,7 +372,6 @@ class TarredTextToSpeechDataset(IterableDataset):
         text_tokenizer: Optional[BaseTokenizer] = None,
         sample_type: str = "concat",
         sample_args: Optional[Dict] = None,
-        speaker_path: Optional[Path] = None,
         feature_readers: Optional[Dict[str, FeatureReader]] = None,
         feature_processors: Optional[Dict[str, FeatureProcessor]] = None,
         min_duration: Optional[float] = None,
@@ -417,14 +395,6 @@ class TarredTextToSpeechDataset(IterableDataset):
         self.volume_norm = volume_norm
         self.pc_dropout_rate = pc_dropout_rate
 
-        if speaker_path:
-            self.include_speaker = True
-            with open(speaker_path, 'r', encoding="utf-8") as speaker_f:
-                self.speaker_index_map = json.load(speaker_f)
-        else:
-            self.include_speaker = False
-            self.speaker_index_map = None
-
         if feature_readers:
             logging.info(f"Found feature readers for {feature_readers.keys()}")
             self.feature_readers = list(feature_readers.values())
@@ -438,30 +408,8 @@ class TarredTextToSpeechDataset(IterableDataset):
             self.feature_processors = []
 
         web_datasets = []
-        dataset_lengths = []
-        self.file_to_sample_map = {}
         for dataset_name, dataset_info in dataset_meta.items():
             dataset_meta = TarredMetadata(**dataset_info)
-
-            dataset_entries = read_manifest(dataset_meta.manifest_path)
-            sample_map, unfiltered_file_count, unfiltered_hours, filtered_hours = process_tarred_manifest(
-                dataset_name=dataset_name,
-                entries=dataset_entries,
-                min_duration=min_duration,
-                max_duration=max_duration,
-                min_words=min_words,
-            )
-            self.file_to_sample_map.update(sample_map)
-
-            dataset_length = len(sample_map)
-            if dataset_length == 0:
-                raise ValueError(f"Found empty dataset {dataset_name} after filtering.")
-
-            logging.info(dataset_name)
-            logging.info(f"Original # of files: {len(dataset_entries)}")
-            logging.info(f"Filtered # of files: {dataset_length}")
-            logging.info(f"Original duration: {unfiltered_hours:.2f} hours")
-            logging.info(f"Filtered duration: {filtered_hours:.2f} hours")
 
             web_dataset = self._create_web_dataset(
                 tar_filepath=dataset_meta.tar_filepath,
@@ -470,13 +418,15 @@ class TarredTextToSpeechDataset(IterableDataset):
                 shard_strategy=shard_strategy,
                 global_rank=global_rank,
                 world_size=world_size,
+                min_duration=min_duration,
+                max_duration=max_duration,
+                min_words=min_words,
             )
             if web_dataset is not None:
                 web_datasets.append(web_dataset)
-                dataset_lengths.append(dataset_length)
 
         self.dataset = create_tarred_dataset(
-            datasets=web_datasets, dataset_lengths=dataset_lengths, sample_type=sample_type, sample_args=sample_args
+            datasets=web_datasets, sample_type=sample_type, sample_args=sample_args
         )
 
         if len(self.dataset) == 0:
@@ -490,6 +440,9 @@ class TarredTextToSpeechDataset(IterableDataset):
         shard_strategy: str,
         global_rank: int,
         world_size: int,
+        min_duration: Optional[float],
+        max_duration: Optional[float],
+        min_words: Optional[int],
     ):
         tar_filepaths = expand_sharded_filepaths(
             sharded_filepaths=tar_filepath,
@@ -503,13 +456,9 @@ class TarredTextToSpeechDataset(IterableDataset):
             # When using scatter shard_strategy, some workers might have no shards for a dataset
             return None
 
-        key_names = ["key"]
-        rename_args = {"key": "__key__"}
+        rename_args = {"meta": "json"}
         for feature_reader in self.feature_readers:
-            key_names.append(feature_reader.feature_name)
             rename_args[feature_reader.feature_name] = feature_reader.get_tarred_suffixes()
-
-        file_ids = set(self.file_to_sample_map.keys())
 
         dataset = wds.DataPipeline(
             wds.SimpleShardList(urls=tar_filepaths),
@@ -517,57 +466,33 @@ class TarredTextToSpeechDataset(IterableDataset):
             wds.tarfile_to_samples(),
             wds.shuffle(shuffle_n),
             wds.rename(**rename_args),
-            lambda iterator: FileFilterIterator(iterator=iterator, file_ids=file_ids),
+            lambda iterator: FileFilterIterator(
+                iterator=iterator,
+                min_duration=min_duration,
+                max_duration=max_duration,
+                min_words=min_words,
+            ),
             wds.map(self._build_sample),
         )
 
         return dataset
 
     def _build_sample(self, inputs):
-        file_id = inputs["key"]
-        data = self.file_to_sample_map[file_id]
-        entry = data.manifest_entry
-
-        audio_filepath = Path(data.manifest_entry["audio_filepath"])
-
-        if "normalized_text" in entry:
-            text = entry["normalized_text"]
-            context_text = entry["context_audio_normalized_text"]
-        else:
-            text = entry["text"]
-            context_text = entry["context_audio_text"]
-
-        # Remove all non-alphanumeric characters, making sure to keep accented and foreign characters
-        context_text = "".join([c for c in context_text if c == " " or c.isalnum()])
-        context_text = context_text.lower().strip()
+        data = inputs["data"]
 
         example = {
-            "dataset_name": data.dataset_name,
-            "audio_filepath": audio_filepath,
-            "duration": data.manifest_entry["duration"],
-            "text": text,
-            "context_text": context_text,
+            "duration": data["duration"],
         }
 
         if self.text_tokenizer:
-            text = dropout_pc(text=text, dropout_rate=self.pc_dropout_rate)
+            text = data["text"]
+            #text = dropout_pc(text=text, dropout_rate=self.pc_dropout_rate)
             text_tokens = self.text_tokenizer(text)
             text_tokens = torch.tensor(text_tokens, dtype=torch.int32)
             text_len = text_tokens.shape[0]
+            example["text"] = text
             example["tokens"] = text_tokens
             example["text_lens"] = text_len
-
-            context_text_tokens = self.text_tokenizer(context_text)
-            context_text_tokens = torch.tensor(context_text_tokens, dtype=torch.int32)
-            context_text_len = context_text_tokens.shape[0]
-
-            example["context_text_tokens"] = context_text_tokens
-            example["context_text_lens"] = context_text_len
-
-        if self.include_speaker:
-            speaker = entry["speaker"]
-            example["speaker"] = speaker
-            example["speaker_index"] = self.speaker_index_map[speaker]
 
         for feature_reader in self.feature_readers:
             feature_bytes = inputs[feature_reader.feature_name]
@@ -584,12 +509,11 @@ class TarredTextToSpeechDataset(IterableDataset):
         return None
 
     def collate_fn(self, batch):
-        return text_to_speech_collate_fn(
+        return tarred_text_to_speech_collate_fn(
             batch,
             feature_readers=self.feature_readers,
             feature_processors=self.feature_processors,
             text_pad_value=self.text_pad_value,
-            include_speaker=self.include_speaker,
         )
 
     def __iter__(self):
