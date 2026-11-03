@@ -833,6 +833,7 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
         image_artifacts = []
         text = batch_dict.get("text")
         text_len = batch_dict.get("text_lens")
+        text_string = batch_dict.get("text_string")
         audio_tokens = batch_dict.get("audio_tokens")
         audio_len = batch_dict.get("audio_token_lens")
 
@@ -840,6 +841,7 @@ class DiscreteSpeechArtifactGenerator(ArtifactGenerator):
             audio_tokens_pred, audio_token_lens = model.infer(
                 text=text,
                 text_len=text_len,
+                text_string=text_string,
                 context_tokens=audio_tokens,
                 context_len=audio_len,
                 frames_per_iter=self.frames_per_iter,

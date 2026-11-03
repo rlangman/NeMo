@@ -34,7 +34,7 @@ from nemo.core.neural_types.elements import (
 from nemo.core.neural_types.neural_type import NeuralType
 
 
-def create_feature_mask(input_len, dist, mask_min, mask_max):
+def create_feature_mask(input_len, dist, mask_min, mask_max, no_mask_prob=0.01):
     batch_size = input_len.shape[0]
     len_mask = get_mask_from_lengths(input_len)
     max_len = len_mask.shape[1]
@@ -53,6 +53,10 @@ def create_feature_mask(input_len, dist, mask_min, mask_max):
     mask = mask_vals >= mask_min_val
 
     mask = mask * len_mask
+
+    if no_mask_prob > 0:
+        apply_mask = torch.rand(input_len.shape[0], device=input_len.device) >= no_mask_prob
+        mask = mask * rearrange(apply_mask, 'B -> B 1')
 
     return mask
 
@@ -418,15 +422,20 @@ class TextEncoder(NeuralModule):
         eos_id,
         space_id,
         space_dur,
+        llm_dim=640,
         mask_min=0.0,
         mask_max=0.0,
         mask_alpha=1.0,
+        llm_mask_min=0.0,
+        llm_mask_max=0.0,
+        llm_mask_alpha=1.0,
     ):
         super(TextEncoder, self).__init__()
         self.d_model = d_model
 
         self.word_emb = torch.nn.Embedding(n_embed, d_model, padding_idx=padding_idx)
         self.context_cond_layer = torch.nn.Linear(d_context, self.d_model)
+        self.llm_cond_layer = torch.nn.Linear(llm_dim, self.d_model)
         self.transformer = transformer
         if down_sample_rate and down_sample_rate > 1:
             self.downsample_layer = TextDownSampling(
@@ -449,12 +458,22 @@ class TextEncoder(NeuralModule):
         else:
             self.text_masking = None
 
+        if llm_mask_max > 0.0:
+            self.llm_masking = FeatureMasking(
+                mask_min=llm_mask_min,
+                mask_max=llm_mask_max,
+                mask_alpha=llm_mask_alpha
+            )
+        else:
+            self.llm_masking = None
+
     @property
     def input_types(self):
         return {
             "text": NeuralType(('B', 'T_text'), EncodedRepresentation()),
             "text_len": NeuralType(('B'), LengthsType()),
             "context_emb": NeuralType(('B', 'D'), EncodedRepresentation()),
+            "llm_emb": NeuralType(('B', 'T_text', 'D'), EncodedRepresentation()),
         }
 
     @property
@@ -466,11 +485,19 @@ class TextEncoder(NeuralModule):
         }
 
     @typecheck()
-    def forward(self, text, text_len, context_emb):
+    def forward(self, text, text_len, context_emb, llm_emb):
         text_mask = get_mask_from_lengths(text_len)
         text_emb = self.word_emb(text)
 
+        llm_cond = self.llm_cond_layer(llm_emb)
+        if self.training and self.llm_masking is not None:
+            llm_cond = self.llm_masking.apply_dropout(inputs=llm_cond, input_len=text_len)
+
+        text_emb = text_emb + llm_cond
+        text_emb = text_emb * rearrange(text_mask, 'B T -> B T 1')
+
         if self.training and self.text_masking is not None:
+            print(f"Masking {self.text_masking.mask_max}")
             text_emb = self.text_masking.apply_dropout(inputs=text_emb, input_len=text_len)
 
         out = self.transformer(x=text_emb, x_mask=text_mask)['output']

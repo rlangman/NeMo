@@ -44,8 +44,10 @@ python convert_to_tarred_audio_dataset.py \
 
 import argparse
 import json
+import io
 import os
 import random
+import re
 import tarfile
 import threading
 import time
@@ -300,7 +302,7 @@ class TTSTarredDatasetBuilder:
         self,
         output_dir: Path,
         shard_id: int,
-        entries: List[Dict[str, any]],
+        entries: List[Dict[str, Any]],
         audio_dir: Path,
         feature_readers: List[FeatureReader],
         feature_dir: Optional[Path],
@@ -316,15 +318,8 @@ class TTSTarredDatasetBuilder:
             for entry in entries:
                 audio_filepath_abs, audio_filepath_rel = get_audio_filepaths(manifest_entry=entry, audio_dir=audio_dir)
 
-                context_filepath_abs, context_filepath_rel = get_audio_filepaths(
-                    manifest_entry=entry, audio_dir=audio_dir, field_name="context_audio_filepath"
-                )
-
                 if not audio_filepath_abs.exists():
                     raise FileNotFoundError(f"Could not find file: {audio_filepath_abs}")
-
-                if not context_filepath_abs.exists():
-                    raise FileNotFoundError(f"Could not find context file: {context_filepath_abs}")
 
                 file_id = get_file_id(audio_filepath_rel)
 
@@ -357,27 +352,33 @@ class TTSTarredDatasetBuilder:
                         tar_info.mtime = time.time()
                         tar_file.addfile(tarinfo=tar_info, fileobj=bytes_io)
 
+                if "normalized_text" in entry:
+                    text = entry["normalized_text"]
+                else:
+                    text = entry["text"]
+
+                text = re.sub(r"\s+", " ", text)
+                text = text.strip()
+
+                metadata_file = f"{base_filename}.json"
+                metadata = {
+                    "text": text,
+                    'duration': entry['duration'],
+                }
+                bytes_io = io.BytesIO(json.dumps(metadata, ensure_ascii=False).encode('utf-8'))
+                bytes_io.seek(0)
+                tar_info = tarfile.TarInfo(name=metadata_file)
+                tar_info.size = bytes_io.getbuffer().nbytes
+                tar_info.mtime = time.time()
+                tar_file.addfile(tarinfo=tar_info, fileobj=bytes_io)
+
                 out_entry = {
                     'audio_filepath': str(audio_filepath_rel),
                     'audio_id': base_filename,
                     'shard_id': shard_id,  # Keep shard ID for record keeping
+                    "text": text,
                     'duration': entry['duration'],
-                    'context_audio_filepath': str(context_filepath_rel),
-                    'context_audio_duration': entry['context_audio_duration']
                 }
-
-                if 'normalized_text' in entry:
-                    out_entry['text'] = entry['normalized_text']
-                    out_entry['context_audio_text'] = entry['context_audio_normalized_text']
-                elif 'text' in entry:
-                    out_entry['text'] = entry['text']
-                    out_entry['context_audio_text'] = entry['context_audio_text']
-
-                if 'speaker' in entry:
-                    out_entry['speaker'] = entry['speaker']
-
-                if 'offset' in entry:
-                    out_entry['offset'] = entry['offset']
 
                 out_entries.append(out_entry)
 

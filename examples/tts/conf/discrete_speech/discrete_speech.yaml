@@ -52,10 +52,6 @@ train_feature_readers:
     _target_: nemo.collections.tts.parts.preprocessing.features.AudioCodecFeatureReader
     feature_name: "audio_tokens"
     feature_len_field: "audio_token_lens"
-  context_codec:
-    _target_: nemo.collections.tts.parts.preprocessing.features.AudioCodecFeatureReader
-    feature_name: "context_tokens"
-    feature_len_field: "context_token_lens"
 
 context_emb_dim: 512
 aligner_context_emb_dim: 256
@@ -109,7 +105,7 @@ model:
       _target_: nemo.collections.tts.g2p.models.i18n_ipa.IpaG2p
       phoneme_dict: ${phoneme_dict_path}
       heteronyms: ${heteronyms_path}
-      phoneme_probability: 0.1
+      phoneme_probability: 0.0
       use_chars: true
       use_stresses: false
 
@@ -120,7 +116,6 @@ model:
         dataset_meta: ${train_ds_meta}
         feature_readers: ${train_feature_readers}
         batch_duration: ${batch_size}
-        pc_dropout_rate: 0.1
         min_duration: 2.0
         max_duration: 20.1
         min_words: 2
@@ -160,14 +155,14 @@ model:
         log_audio: true
         log_alignment: false
         audio_weight: 4.0
-        audio_topk: 20
+        audio_topk: 10
         audio_temperature: 0.5
-        acoustic_topk: 20
+        acoustic_topk: 10
         acoustic_temperature: 0.5
         duration_weight: 1.0
         duration_topk: 2
         duration_temperature: 0.5
-        silence_pad_start: 2
+        silence_pad_start: 3
         silence_pad_end: 3
 
     dataset:
@@ -209,11 +204,12 @@ model:
 
   text_encoder:
     _target_: nemo.collections.tts.modules.discrete_speech_modules.TextEncoder
+    llm_mask_max: 0.5
     d_model: ${text_hidden_dim}
     d_context: ${context_emb_dim}
     transformer:
       _target_: nemo.collections.tts.modules.transformer_2501.Transformer
-      n_layers: 10
+      n_layers: 8
       d_model: ${text_hidden_dim}
       d_ffn: ${text_filters}
       sa_n_heads: 8
@@ -310,7 +306,7 @@ model:
 
   optim:
     name: adamw
-    lr: 3e-5
+    lr: 4e-5
 
     sched:
       name: ExponentialLR

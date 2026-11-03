@@ -1,8 +1,10 @@
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Any, Dict, Iterator, List, Optional, Set
+import json
+from typing import Any, Dict, List, Optional
 
 import numpy as np
+import re
 
 from nemo.collections.asr.parts.preprocessing.segment import available_formats as valid_sf_formats
 from nemo.collections.tts.parts.utils.tts_dataset_utils import filter_dataset
@@ -74,27 +76,47 @@ def process_tarred_manifest_vocoder(
 
 
 class FileFilterIterator:
-    def __init__(self, iterator: Iterator, file_ids: Set[str], id_field="key"):
+    def __init__(self, iterator, min_duration, max_duration, min_words, max_text_per_second = 20):
         self.iterator = iterator
-        self.file_ids = file_ids
-        self.id_field = id_field
+        self.min_duration = min_duration
+        self.max_duration = max_duration
+        self.min_words = min_words
+        self.max_text_per_second = max_text_per_second
 
     def __iter__(self):
         return self
 
     def __next__(self):
         while True:
-            data_dict = next(self.iterator)
-            file_id = data_dict[self.id_field]
-            if file_id in self.file_ids:
-                return data_dict
+            inputs = next(self.iterator)
+            entry = inputs["meta"]
+            entry = entry.decode("utf-8")
+            entry = json.loads(entry)
 
+            duration = entry["duration"]
+            if not (self.min_duration <= duration <= self.max_duration):
+                continue
+
+            text = entry["text"]
+            text = text.replace("[", "")
+            text = text.replace("]", "")
+            text = re.sub(r"\s+", " ", text)
+            text = text.strip()
+            entry["text"] = text
+            if len(text) > self.max_text_per_second * duration:
+                continue
+
+            if self.min_words and len(text.split(" ")) < self.min_words:
+                continue
+
+            inputs["data"] = entry
+            return inputs
 
 def create_tarred_dataset(
     sample_type: str,
     sample_args: Optional[Dict],
     datasets: List[IterableDataset],
-    dataset_lengths: List[int],
+    dataset_lengths: List[int] = None,
 ):
     if sample_args is None:
         sample_args = {}
@@ -102,7 +124,7 @@ def create_tarred_dataset(
     if sample_type == "concat":
         return TarredConcatDataset(datasets=datasets, dataset_lengths=dataset_lengths)
     elif sample_type == "weighted_random":
-        return TarredWeightedRandomDataset(datasets=datasets, dataset_lengths=dataset_lengths, **sample_args)
+        return TarredWeightedRandomDataset(datasets=datasets, **sample_args)
     else:
         raise ValueError(f"Unknown sampling type {sample_type}")
 
@@ -132,16 +154,14 @@ class TarredWeightedRandomDataset(IterableDataset):
     def __init__(
         self,
         datasets: List[IterableDataset],
-        dataset_lengths: List[int],
         dataset_weights: List[float],
         batch_size: int,
         steps_per_epoch: int
     ):
         super().__init__()
-        assert len(datasets) == len(dataset_lengths) == len(dataset_weights)
+        assert len(datasets)  == len(dataset_weights)
 
         self.datasets = datasets
-        self.dataset_lengths = dataset_lengths
         self.dataset_weights = dataset_weights
         self.samples_per_epoch = batch_size * steps_per_epoch
         self.dataset_indices = list(range(len(self.datasets)))

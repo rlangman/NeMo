@@ -30,7 +30,8 @@ from nemo.collections.tts.parts.utils.tts_dataset_utils import (
     get_audio_filepaths,
     load_audio,
     normalize_volume,
-    stack_tensors
+    stack_tensors,
+    stack_tensors_3d,
 )
 from nemo.utils.decorators import experimental
 
@@ -115,9 +116,14 @@ def _feature_collate_fn(feature_name: str, train_batch: List[Dict[str, Any]]) ->
         feature_tensor = torch.from_numpy(feature_array)
         feature_tensors.append(feature_tensor)
 
-    max_len = max([f.shape[0] for f in feature_tensors])
-    stacked_features = stack_tensors(feature_tensors, max_lens=[max_len])
+    feature_lens = torch.IntTensor([f.shape[0] for f in feature_tensors])
+    max_len = feature_lens.max().item()
+    if len(feature_tensors[0].shape) == 2:
+        stacked_features = stack_tensors_3d(feature_tensors, max_len=max_len)
+    else:
+        stacked_features = stack_tensors(feature_tensors, max_lens=[max_len])
     feature_dict[feature_name] = stacked_features
+    feature_dict[f"{feature_name}_len"] = feature_lens
 
     return feature_dict
 
@@ -218,11 +224,13 @@ class NumpyFeatureReader(FeatureReader):
         hop_length: int = 256,
         feature_filename: Optional[str] = None,
         manifest_field: str = "audio_filepath",
+        use_offset: bool = False,
     ):
         super().__init__(feature_name=feature_name)
         self.sample_rate = sample_rate
         self.hop_length = hop_length
         self.manifest_field = manifest_field
+        self.use_offset = use_offset
         if feature_filename:
             self.feature_filename = feature_filename
         else:
@@ -280,7 +288,7 @@ class NumpyFeatureReader(FeatureReader):
         )
         feature_filepath = str(feature_filepath)
 
-        if indices:
+        if self.use_offset and indices:
             feature_mmap = np.load(feature_filepath, mmap_mode='r')
             feature_array = feature_mmap[indices[0]: indices[1]]
             feature_array = np.copy(feature_array)
